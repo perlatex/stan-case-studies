@@ -1,0 +1,95 @@
+# 女性左撇子比男性左撇子多 {#lefthanded}
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+library(broom.mixed)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+```
+
+
+
+
+
+
+```{r}
+tb <- tibble::tribble(
+  ~sex,   ~left_handed, ~right_handed,
+  "male",           9L,           43L,
+  "female",         4L,           44L
+  )
+
+```
+
+
+
+```{r}
+steps <- seq(from = 0, to = 1, by = .01)
+
+ggplot(data.frame(x = steps, y = dbeta(steps, shape1 = 1, shape2 = 1))) + 
+  geom_line(aes(x, y)) +
+  scale_x_continuous(breaks = (0:10) / 10) + 
+  ylim(0, 2) +
+  labs(x = "p(left-handed)", y = "density", title = "beta(1,1)")
+
+
+
+ggplot(data.frame(x = steps, y = dbeta(steps, shape1 = 5, shape2 = 40))) + 
+  geom_line(aes(x, y)) +
+  scale_x_continuous(breaks = (0:10) / 10) +
+  labs(x = "p(left-handed)", y = "density", title = "beta(5,40)")
+```
+
+
+
+
+
+```{r}
+stan_program <- "
+data {
+  int<lower=1> event_1;        
+  int<lower=1> event_2;        
+  int<lower=1> n_1;            
+  int<lower=1> n_2;            
+}
+parameters {
+  real<lower=0,upper=1> p_1;    
+  real<lower=0,upper=1> p_2;    
+}
+model {
+  event_1 ~ binomial(n_1, p_1);
+  event_2 ~ binomial(n_2, p_2);
+  p_1 ~ beta(5, 40);
+  p_2 ~ beta(5, 40);
+}
+generated quantities {
+  real diff = p_1 - p_2;
+}
+"
+
+
+stan_data <- list(
+  n_1     = 52, # men
+  event_1 = 9 , # left-handed men
+  n_2     = 48, # women
+  event_2 = 4   # left-handed women
+)
+
+
+stan_eq <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+stan_eq %>%
+  tidybayes::spread_draws(diff) %>% 
+  ggplot(aes(x = diff, y = 1)) +
+  geom_halfeyeh() +
+  geom_vline(xintercept = 0)
+```
+

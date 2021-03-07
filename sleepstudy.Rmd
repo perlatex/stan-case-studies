@@ -1,0 +1,616 @@
+# 睡眠剥夺后的反应时间 {#sleepstudy}
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+```{r}
+data("sleepstudy", package = "lme4")
+sleepstudy
+```
+
+
+```{r}
+sleepstudy %>% 
+  ggplot(aes(Days, Reaction)) +
+  geom_point()
+```
+
+```{r}
+sleepstudy %>% 
+  mutate(cond = paste0("Subject = ", Subject)) %>% 
+  ggplot(aes(Days, Reaction)) +
+  geom_point() + 
+  facet_wrap("cond", nrow = 3) +
+  theme_bw()
+```
+
+## Linear MLMs: Varying Intercepts and Varying Slopes
+
+$$
+\begin{aligned}
+y_n &\sim \mathcal{N}(\mu_n, \sigma)\\
+\mu_n &= b_{0j[n]} + b_{1j[n]} x_n \\
+(b_{0j}, b_{1j}) &\sim \mathcal{MN}((b_0, b_1), \Sigma_{b}) \\
+\end{aligned}
+$$
+
+
+
+
+$$
+\Sigma_{b} = \left(
+\begin{matrix}
+  \sigma_{b_0}^2 & \sigma_{b_0} \sigma_{b_1} \rho_{b_0 b_1}  \\
+  \sigma_{b_0} \sigma_{b_1} \rho_{b_0 b_1} & \sigma_{b_1}^2
+\end{matrix}
+\right)
+$$
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  vector[N] y;
+  vector[N] x;
+  int J;            
+  int<lower=1, upper=J> g[N];
+}
+parameters {
+  vector[J] alpha;
+  vector[J] beta;
+  real a;
+  real b;
+  real<lower=0> sigma;
+  
+  corr_matrix[2] Rho;
+  vector<lower=0>[2] sigma_g; 
+}
+transformed parameters {
+ vector[N] mu;
+ for (i in 1:N) {
+   mu[i] = alpha[g[i]] + beta[g[i]] * x[i];
+ }
+}
+model {
+
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[i], sigma);
+  }
+
+  for(j in 1:J) {
+    [alpha[j], beta[j]]' ~ multi_normal([a, b]', quad_form_diag(Rho, sigma_g));
+  }
+  
+  sigma  ~ exponential(1);
+  a ~ normal(0, 1);
+  b ~ normal(0, 1);
+  Rho ~ lkj_corr(2);
+  sigma_g ~ exponential(1);
+}
+
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = Days, 
+   y = Reaction,
+   J = n_distinct(Subject),
+   g = Subject
+  )
+
+
+fit_mlm1 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_mlm1 
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  vector[N] y;
+  vector[N] x;
+  int J;            
+  int<lower=1, upper=J> g[N];
+}
+parameters {
+  vector[J] alpha;
+  vector[J] beta;
+  real a;
+  real b;
+  real<lower=0> sigma;
+  
+  corr_matrix[2] Rho;
+  vector<lower=0>[2] tau; 
+}
+transformed parameters {
+ vector[2] YY[J];
+ vector[2] MU;
+ MU = [a, b]';
+ for (j in 1:J) {
+ YY[j] =  [alpha[j], beta[j]]';
+ }
+}
+model {
+  vector[N] mu;
+  
+  for (i in 1:N) {
+    mu[i] = alpha[g[i]] + beta[g[i]] * x[i];
+  }
+ 
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[i], sigma);
+  }
+
+  for(j in 1:J) {
+    YY ~ multi_normal(MU, quad_form_diag(Rho, tau));
+  }
+  
+  sigma  ~ exponential(1);
+  a ~ normal(0, 1);
+  b ~ normal(0, 1);
+  Rho ~ lkj_corr(2);
+  tau ~ exponential(1);
+}
+
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = Days, 
+   y = Reaction,
+   J = n_distinct(Subject),
+   g = Subject
+  )
+
+
+fit_mlm2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_mlm2 
+```
+
+
+
+## 用stan-book的方法
+
+系数设定为 array of vector
+
+上面的方法是通过[alpha, beta]'，拼凑成vector，目的是要构造成multi_normal()所需要的vector输入， 现在这一个是用 for(i in 1:n_group) 循环即可。
+之所以能用 for 循环，是因为后者把系数定义成 array of vector 形式，一个vector的样子就像一根糖葫芦，一列一列的喂进去。
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int K; 
+  matrix[N, K] X;
+  int J;            
+  int<lower=1, upper=J> g[N];
+  vector[N] y;
+}
+parameters {
+  vector[K] beta[J];                     // array of vector
+  vector[K] gamma;                       // fix effect
+  real<lower=0> sigma;
+  
+  corr_matrix[K] Rho;
+  vector<lower=0>[K] tau; 
+}
+transformed parameters {
+ vector[N] mu;
+ for (i in 1:N) {
+   mu[i] = X[i] * beta[g[i]];
+ }
+}
+model {
+
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[i], sigma);
+  }
+
+  for(j in 1:J) {
+    beta[j] ~ multi_normal(gamma, quad_form_diag(Rho, tau));
+  }
+  
+  sigma  ~ exponential(1);
+  gamma ~ normal(0, 5);
+  Rho ~ lkj_corr(2);
+  tau ~ exponential(1);
+}
+
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   K = 2,
+   X = model.matrix(~ Days, .), 
+   y = Reaction,
+   J = n_distinct(Subject),
+   g = Subject
+  )
+
+
+fit_mlm3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_mlm3
+```
+
+
+## 上面方法的**矢量化**优化
+
+Optimization through Vectorization
+```
+for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[i], sigma);
+  } // for循环 log of simga 要循环N次
+
+y ~ normal(mu, sigma); // 只计算一次
+```
+
+当然要平衡和兼顾**代码执行效率和代码可读性**
+
+当前版本，个人感觉是最佳的
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int K; 
+  matrix[N, K] X;
+  int J;            
+  int<lower=1, upper=J> g[N];
+  vector[N] y;
+}
+parameters {
+  vector[K] beta[J];                     // array of vector
+  vector[K] MU;                          // fix effect
+  real<lower=0> sigma;
+  
+  corr_matrix[K] Rho;
+  vector<lower=0>[K] tau; 
+}
+
+model {
+  vector[N] mu;
+  
+  for (i in 1:N) {
+    mu[i] = X[i] * beta[g[i]];
+  }
+  y ~ normal(mu, sigma);
+  
+  for(j in 1:J) {
+    beta[j] ~ multi_normal(MU, quad_form_diag(Rho, tau));
+  }
+  
+  sigma ~ exponential(1);
+  MU ~ normal(0, 5);
+  Rho ~ lkj_corr(2);
+  tau ~ exponential(1);
+}
+generated quantities {
+  vector[N] y_rep;
+
+  for (n in 1:N) {
+    y_rep[n] = normal_rng(X[n] * beta[g[n]], sigma);
+  }
+  
+}
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   K = 2,
+   J = n_distinct(Subject),
+   X = model.matrix(~ 1 + Days, .), 
+   y = Reaction,
+   g = Subject
+  )
+
+
+fit_mlm4 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+## Cholesky因子分解优化版（待理解）
+
+这里**非中心化参数**，先给定一个 z (形式是矩阵，分布是标准正态), 通过z构建系数beta，（待理解）
+- beta 是矩阵[J, K]（注意与array of vector的结构不同），这里是一行一行的看，一行代表(intercept , beta_1,  beta2, ...)，因此得这样写`y ~ normal(rows_dot_product(beta[g], x), sigma);` beta[g]在前。
+  
+- `beta = gamma + (diag_pre_multiply(tau, L_Omega) * z)';` 矢量化的循环，是对结构的最外层开始的， 矩阵矢量化先分解beta[i],代表一行一行的。
+
+- 疑问，matrix[J, K] gamma;是干什么用的，为何是矩阵？还不明白。
+
+
+若这样写不能让代码效率不显著提升的，可以先不管。
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int K; 
+  matrix[N, K] X;
+  int J;            
+  int<lower=1, upper=J> g[N];
+  vector[N] y;
+}
+parameters {
+  matrix[K, J] z;
+  cholesky_factor_corr[K] L_Omega;
+                   
+  matrix[J, K] gamma;                       
+  real<lower=0> sigma;
+  
+  vector<lower=0, upper=pi()/2>[K] tau_unif; 
+}
+transformed parameters {
+  matrix[J, K] beta;        // 
+  vector<lower=0>[K] tau;   //prior scale
+  for (k in 1:K) {
+    tau[k] = 2.5 * tan(tau_unif[k]);
+  }
+  
+  beta = gamma + (diag_pre_multiply(tau, L_Omega) * z)';
+}
+model {
+  to_vector(z) ~ std_normal();
+  L_Omega ~ lkj_corr_cholesky(2);
+  to_vector(gamma) ~ normal(0, 5);
+  
+  y ~ normal(rows_dot_product(beta[g], X), sigma);
+
+}
+
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   K = 2,
+   X = model.matrix(~ Days, .), 
+   y = Reaction,
+   J = n_distinct(Subject),
+   g = Subject
+  )
+
+
+fit_mlm5 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_mlm5
+```
+
+
+## 用 fit_mlm4 分析
+
+```{r}
+fit_mlm4 %>% write_rds(here::here("stan_save", "fit_mlm4.rds"))
+fit_mlm4 <- read_rds(here::here("stan_save", "fit_mlm4.rds"))
+```
+
+
+```{r}
+summary(fit_mlm4, c("MU"))$summary
+```
+
+```{r}
+summary(fit_mlm4, c("y_rep"))$summary
+```
+
+```{r}
+y_rep <- as.matrix(fit_mlm4, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = sleepstudy$Reaction, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r}
+y_rep <- as.matrix(fit_mlm4, pars = "y_rep")
+bayesplot::ppc_intervals(y = sleepstudy$Reaction,
+                         yrep = y_rep, 
+                         x = sleepstudy$Days
+                         ) 
+```
+
+
+
+
+```{r}
+fit_mlm4 %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  tidybayes::mean_qi() %>%
+  dplyr::bind_cols(sleepstudy)
+```
+
+
+
+```{r}
+fit_mlm4 %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  tidybayes::mean_qi() %>%
+  dplyr::bind_cols(sleepstudy) %>%
+  mutate(cond = paste0("Subject = ", Subject)) %>% 
+  
+  ggplot(aes(x = Days, y = y_rep), size = 2) +
+  geom_point(aes(x = Days, y = Reaction), size = 2) +
+  geom_line(color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  ) +
+  facet_wrap(vars(cond), ncol = 6) +
+  theme_bw()
+```
+
+- 返回180 * 4000个样本，然后按照 i= 180 分组（18个人，每人10天），也就4000个抽样弄成一个数。
+- 这里希望 180 * 4000样本，希望按照10天分组（希望横坐标为Days= c(0:9) 天）
+
+
+```{r}
+sleepstudy_i <- sleepstudy %>% 
+  mutate(i = 1:n())
+
+fit_mlm4_by_days <- fit_mlm4 %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  ungroup() %>% 
+  dplyr::left_join(
+    sleepstudy_i, by = "i"
+  ) %>% 
+  group_by(Days) %>% 
+  tidybayes::mean_qi(y_rep, .width = c(.50))
+
+fit_mlm4_by_days
+```
+
+
+
+```{r, fig.width=4, fig.height= 6}
+p2 <- fit_mlm4_by_days %>%
+  ggplot(aes(x = Days, y = y_rep), size = 2) +
+  geom_line() +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  )
+p2
+```
+重复的 marginal_effects()？和作者的一样？作者为了对比，没有分层的的对比，我也试试看
+pauer用的 marginal_effects() 这个函数是怎么回事？
+
+## 简单线性回归
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int K; 
+  matrix[N, K] X;
+  vector[N] y;
+}
+parameters {
+  vector[K] beta;                     
+  real<lower=0> sigma;
+}
+
+model {
+  vector[N] mu;
+  
+  for (i in 1:N) {
+    mu[i] = X[i] * beta;
+  }
+  y ~ normal(mu, sigma);
+  
+  sigma ~ exponential(1);
+
+}
+generated quantities {
+  vector[N] y_rep;
+
+  for (n in 1:N) {
+    y_rep[n] = normal_rng(X[n] * beta, sigma);
+  }
+  
+}
+"
+
+stan_data <- sleepstudy %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   K = 2,
+   X = model.matrix(~ 1 + Days, .), 
+   y = Reaction,
+  )
+
+
+fit_lm <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+
+```{r, fig.width=4, fig.height= 6}
+sleepstudy_i <- sleepstudy %>% 
+  mutate(i = 1:n())
+
+fit_lm_by_days <- fit_lm  %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  ungroup() %>% 
+  dplyr::left_join(
+    sleepstudy_i, by = "i"
+  ) %>% 
+  group_by(Days) %>% 
+  tidybayes::mean_qi(y_rep, .width = c(.50))
+
+
+p1 <- fit_lm_by_days %>%
+  ggplot(aes(x = Days, y = y_rep), size = 2) +
+  geom_line() +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  ) 
+p1
+```
+
+```{r}
+library(patchwork)
+p1 + p2
+```
+与作者的图，还是很大差距，感觉我的方法是不对的
+```
+?brms::marginal_effects
+```
+
+
+
+
+## brms
+
+```{r}
+library(brms)
+fit_brms <- brm(Reaction ~ Days + (Days | Subject),
+data = sleepstudy)
+```
+```{r}
+fit_brms
+```
+
+
+
+
+

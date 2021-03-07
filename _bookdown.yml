@@ -1,0 +1,27 @@
+book_filename: stan
+clean: [packages.bib, bookdown.bbl]
+language:
+  label:
+    fig: "图 "
+    tab: "表 "
+  ui:
+    edit: "编辑"
+    chapter_name: ["第 ", " 章"]
+
+rmd_files: [
+  "index.Rmd",
+  
+  "movies.Rmd",
+  "height_weight.Rmd",
+  "cancer.Rmd",
+  "icecream.Rmd",
+  "left_handed_FishersExactTest.Rmd",
+  "NASA_chi_square_test.Rmd",
+  "vaccine_effectiveness.Rmd",
+  "complaint_traps_hierarchical.Rmd",
+  "wait_coffe.Rmd",
+  "sleepstudy.Rmd",
+  "Homicides.Rmd",
+  "SIR_ode.Rmd",
+  "Non_linear.Rmd"
+]

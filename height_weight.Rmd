@@ -1,0 +1,183 @@
+# 身高体重 {#height-weight}
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+## 线性模型
+
+从最简单的线性模式开始
+$$
+y_n = \alpha + \beta x_n + \epsilon_n \quad \text{where}\quad
+\epsilon_n \sim \operatorname{normal}(0,\sigma).
+$$
+
+等价于
+
+$$
+y_n - (\alpha + \beta X_n) \sim \operatorname{normal}(0,\sigma),
+$$
+
+进一步等价
+
+$$
+y_n \sim \operatorname{normal}(\alpha + \beta X_n, \, \sigma).
+$$
+
+
+```{r bayes-simuate, eval=FALSE}
+alpha_real <- 10
+beta_real  <- 3
+sigma_real <- 2
+
+df <- tibble(
+  x = runif(30, 1, 8),
+  y = rnorm(30, alpha_real + beta_real * x, sd = sigma_real)
+)
+```
+
+
+
+```{r, eval=FALSE}
+stan_program <- "
+data {
+  int<lower=0> N;
+  vector[N] x;
+  vector[N] y;
+}
+parameters {
+  real alpha;
+  real beta;
+  real<lower=0> sigma;
+}
+model {
+  y ~ normal(alpha + beta * x, sigma);
+}
+generated quantities {
+  vector[N] y_rep; 
+  for (n in 1:N) 
+    y_rep[n] = normal_rng(alpha + beta * x[n], sigma);
+}
+
+"
+
+stan_data <- df %>%
+  tidybayes::compose_data(
+    N = nrow(.),
+    x = x,
+    y = y
+  )
+
+fit_normal <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r include=FALSE}
+# 运行stan代码，导致渲染bookdown报错，不知道为什么，先用这边笨办法凑合吧
+#
+#save(fit_normal, 
+#     stan_data, 
+#     alpha_real, 
+#     beta_real, 
+#     sigma_real, 
+#     file = here::here("stan", "stan_data_normal.Rdata")
+#     ) 
+
+load(here::here("stan", "stan_data_normal.Rdata"))
+```
+
+### 模型输出
+
+```{r}
+fit_normal
+```
+
+
+
+### 模型评估
+```{r}
+rstan::traceplot(fit_normal, pars = c("alpha", "beta", "sigma"))
+```
+
+
+```{r, eval=FALSE}
+rstan::extract(fit_normal, par = c("alpha", "beta"))
+rstan::extract(fit_normal, par = "alpha")$alpha
+rstan::extract(fit_normal, par = "beta")$beta
+```
+
+
+
+
+
+```{r, eval=FALSE}
+fit_normal %>% 
+  tidybayes::gather_draws(alpha, beta) %>% 
+  ggplot(aes(x = .value, y = as_factor(.variable)) ) +
+  ggdist::stat_halfeye() +
+  geom_vline(xintercept = c(alpha_real, beta_real)) 
+```
+
+
+
+事实上，`bayesplot`宏包提供了大量模型评估函数，大爱!!
+
+```{r, message=FALSE, results=FALSE}
+true_alpha_beta <- c(alpha_real, beta_real, sigma_real)
+
+posterior_alpha_beta <- 
+  as.matrix(fit_normal, pars = c('alpha','beta', 'sigma'))
+bayesplot::mcmc_recover_hist(posterior_alpha_beta, true = true_alpha_beta)
+```
+
+
+```{r}
+y_rep <- as.matrix(fit_normal, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_data$y, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r bayes-09}
+y_rep <- as.matrix(fit_normal, pars = "y_rep")
+bayesplot::ppc_intervals(y = stan_data$y, yrep = y_rep, x = stan_data$x) 
+```
+
+
+
+## bayesian workflow
+
+
+
+
+## 参考资料
+
+- https://mc-stan.org/
+- https://github.com/jgabry/bayes-workflow-book
+- https://github.com/XiangyunHuang/masr/
+- https://github.com/ASKurz/Statistical_Rethinking_with_brms_ggplot2_and_the_tidyverse_2_ed/
+- 《Regression and Other Stories》, Andrew Gelman, Cambridge University Press. 2020
+- 《A Student's Guide to Bayesian Statistics》,  Ben Lambert, 2018
+- 《Statistical Rethinking: A Bayesian Course with Examples in R and STAN》 ( 2nd Edition), by Richard McElreath, 2020
+- 《Bayesian Data Analysis》, Third Edition, 2013
+- 《Doing Bayesian Data Analysis: A Tutorial with R, JAGS, and Stan》  (2nd Edition) John Kruschke, 2014
+- 《Bayesian Models for Astrophysical Data: Using R, JAGS, Python, and Stan》， Joseph M. Hilbe, Cambridge University Press, 2017
+
+
+```{r bayes-20, echo = F}
+# remove the objects
+# ls() %>% stringr::str_flatten(collapse = ", ")
+
+rm(fit_normal, y_rep, stan_data, alpha_real, beta_real, sigma_real,posterior_alpha_beta, true_alpha_beta)
+```
+
+
+
+```{r bayes-21, echo = F, message = F, warning = F, results = "hide"}
+pacman::p_unload(pacman::p_loaded(), character.only = TRUE)
+```
+

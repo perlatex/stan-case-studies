@@ -1,0 +1,325 @@
+# 非线性模型 {#nonlinear}
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+```
+
+## lognormal density plot
+
+$$
+\text{ulr} \sim \mathcal{LN}(\log(0.5), 0.3)
+$$
+
+```{r, echo=FALSE}
+data.frame(ulr = seq(0, 2, 0.01)) %>%
+  mutate(density = dlnorm(ulr, log(0.5), 0.3)) %>%
+  ggplot(aes(ulr, density)) + 
+  geom_line(size = 1.2)
+```
+
+
+
+```{r}
+ggplot() +
+  stat_function(
+    fun = dlnorm,
+    n = 200,
+    xlim = c(0, 2)
+  ) 
+
+
+ggplot() +
+  stat_function(
+    fun = dlnorm,
+    n = 200,
+    args = list(mean = log(0.5), sd = 0.3),
+    xlim = c(0, 2)
+  ) 
+
+```
+
+```{r}
+d <- readr::read_csv("./rawdata/ClarkTriangle.csv")
+loss <- d %>% 
+  mutate(LR = cum / premium) %>% 
+  mutate(AY = as_factor(AY))
+loss
+```
+
+
+```{r}
+loss %>% 
+  ggplot(aes(dev, cum)) +
+  geom_point() +
+  facet_wrap("AY", nrow = 2)
+
+loss %>%
+  ggplot(aes(dev, LR)) +
+  geom_point() +
+  facet_wrap("AY", nrow = 2)
+```
+
+## the Non-Linear Model:
+
+
+
+
+
+## Fitting Non-Linear models with brms
+
+```{r}
+library(brms)
+bform <- bf(
+  LR ~ ulr * (1 - exp(-(dev/theta)^omega)),
+  ulr ~ 1 + (1|AY), omega ~ 1, theta ~ 1, 
+  nl = TRUE
+)
+
+bprior <- 
+  prior(lognormal(log(0.5), 0.3), nlpar = "ulr", lb = 0) + 
+  prior(normal(1, 2), nlpar = "omega", lb = 0) +
+  prior(normal(45, 10), nlpar = "theta", lb = 0)
+
+fit_LR <- brm(bform, data = loss, prior = bprior)
+```
+
+```{r}
+brms::stancode(fit_LR)
+standata <- brms::standata(fit_LR)
+```
+
+
+
+## 上stan
+
+$$
+\begin{align}
+\text{LR} &\sim \mathcal{N}(\eta, \sigma) \\
+\eta & = \text{ulr}_{\text{AY}} \times  1 - \exp\left( - \left(\frac{\text{dev}}{\theta} \right)^\omega \right)\\
+\text{ulr}_{\text{AY}} &\sim \mathcal{N}(\text{ulr}, \sigma_\text{ulr}) \\
+\text{ulr} &\sim \mathcal{LN}(\log(0.5), 0.3) \\
+\omega &\sim \mathcal{N}_+(1, 2)\\
+\theta &\sim \mathcal{N}_+(45, 10)\\
+\end{align}
+$$
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;  
+  vector[N] y;                  
+  vector[N] x;          
+  int<lower=1> J;             
+  int<lower=1, upper=J> g[N];          
+
+}
+
+parameters {
+  real<lower=0> b_omega;    
+  real<lower=0> b_theta;    
+  
+  real<lower=0> sigma;      
+  
+  real<lower=0> sigma_ulr;           
+  real ulr_mean;           
+  vector[J] z;               
+}
+transformed parameters {
+  vector[J] b_ulr;   
+  for (j in 1:J) {
+    b_ulr[j] = ulr_mean + sigma_ulr * z[j];
+  }
+}
+model {
+  
+  vector[N] mu;
+  for (i in 1:N) {
+    mu[i] = b_ulr[g[i]] * (1 - exp( - (x[i] / b_theta) ^ b_omega));
+  }
+  target += normal_lpdf(y | mu, sigma);
+
+  z ~ std_normal();
+  ulr_mean ~ lognormal(log(0.5), 0.3);
+  b_omega ~ normal(1, 2);
+  b_theta ~ normal(45, 2);
+}
+generated quantities {
+  vector[N] y_rep;
+  vector[N] MU;
+  for (i in 1:N) {
+    MU[i] = b_ulr[g[i]] * (1 - exp( - (x[i] / b_theta) ^ b_omega));
+    y_rep[i] = normal_rng(MU[i], sigma);
+  }
+}
+"
+
+stan_data <- loss %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   J = n_distinct(AY),
+   x = dev, 
+   y = LR,
+   g = AY
+  )
+
+
+fit_mlm44 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+fit_mlm44 %>% write_rds(here::here("stan_save", "fit_mlm44.rds"))
+fit_mlm44 <- read_rds(here::here("stan_save", "fit_mlm44.rds"))
+fit_mlm44
+```
+
+
+```{r}
+fit_mlm44 %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  tidybayes::mean_qi() %>%
+  dplyr::bind_cols(loss)
+```
+```{r}
+fit_mlm44 %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  tidybayes::mean_qi() %>%
+  dplyr::bind_cols(loss) %>%
+
+  ggplot(aes(x = dev, y = y_rep), size = 2) +
+  geom_point(aes(x = dev, y = LR), size = 2) +
+  geom_line(color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  ) +
+  facet_wrap(vars(AY), ncol = 6) +
+  theme_bw()
+```
+
+
+## 能补全数据
+```{r}
+loss %>% count(dev)
+loss %>% count(dev)
+loss_complete <- loss %>% complete(AY, dev)
+loss_complete
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;  
+  vector[N] y;                  
+  vector[N] x;          
+  int<lower=1> J;             
+  int<lower=1, upper=J> g[N];          
+
+  int<lower=1> M;  
+  vector[M] new_x;          
+  int<lower=1, upper=J> new_g[M];     
+}
+
+parameters {
+  real<lower=0> b_omega;    
+  real<lower=0> b_theta;    
+  
+  real<lower=0> sigma;      
+  
+  real<lower=0> sigma_ulr;           
+  real ulr_mean;           
+  vector[J] z;               
+}
+transformed parameters {
+  vector[J] b_ulr;   
+  for (j in 1:J) {
+    b_ulr[j] = ulr_mean + sigma_ulr * z[j];
+  }
+}
+model {
+  
+  vector[N] mu;
+  for (i in 1:N) {
+    mu[i] = b_ulr[g[i]] * (1 - exp( - (x[i] / b_theta) ^ b_omega));
+  }
+  target += normal_lpdf(y | mu, sigma);
+
+  z ~ std_normal();
+  ulr_mean ~ lognormal(log(0.5), 0.3);
+  b_omega ~ normal(1, 2);
+  b_theta ~ normal(45, 2);
+}
+generated quantities {
+  vector[M] y_rep;
+  vector[M] MU;
+  for (i in 1:M) {
+    MU[i] = b_ulr[new_g[i]] * (1 - exp( - (new_x[i] / b_theta) ^ b_omega));
+    y_rep[i] = normal_rng(MU[i], sigma);
+  }
+}
+"
+
+stan_data <- loss %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   J = n_distinct(AY),
+   x = dev, 
+   y = LR,
+   g = AY,
+   
+   M = nrow(loss_complete),
+   new_x = loss_complete$dev, 
+   new_g = loss_complete$AY
+  )
+
+
+fit_mlm44_complete <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+fit_mlm44_complete %>% write_rds(
+  here::here("stan_save", "fit_mlm44_complete.rds")
+  )
+
+fit_mlm44_complete <- read_rds(
+  here::here("stan_save", "fit_mlm44_complete.rds")
+  )
+fit_mlm44_complete
+```
+
+
+```{r}
+fit_mlm44_complete %>%
+  tidybayes::spread_draws(y_rep[i]) %>%
+  tidybayes::mean_qi() %>%
+  dplyr::bind_cols(loss_complete) %>%
+
+  ggplot(aes(x = dev, y = y_rep), size = 2) +
+  geom_point(aes(x = dev, y = LR), size = 2) +
+  geom_line(color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  ) +
+  facet_wrap(vars(AY), ncol = 5) +
+  theme_bw()
+```
+
+
+```{r}
+fit_mlm44_complete %>%
+  tidybayes::spread_draws(b_ulr[i]) %>%
+  tidybayes::mean_qi()
+```
+

@@ -1,0 +1,565 @@
+# 不同天气温度冰淇淋销量 {#icecream}
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+## 不同天气温度冰淇淋销量
+
+```{r}
+icecream <- data.frame(
+  temp = c( 11.9, 14.2, 15.2, 16.4, 17.2, 18.1, 
+         18.5, 19.4, 22.1, 22.6, 23.4, 25.1),
+  units = c( 185L, 215L, 332L, 325L, 408L, 421L, 
+          406L, 412L, 522L, 445L, 544L, 614L)
+  )
+```
+
+
+
+```{r}
+ggplot(icecream, aes(temp, units)) + 
+  geom_point()
+```
+
+
+
+## linear models
+$$
+\begin{align}
+y_n &\sim \mathcal{Normal}(\mu_n, \,\, \sigma)\\
+\mu_n &= \alpha + \beta x_n 
+\end{align}
+$$
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int<lower=0> y[N];
+  vector[N] x;
+}
+parameters {
+  real alpha;
+  real beta;
+  real<lower=0> sigma;
+}
+model {
+
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | alpha + beta * x[i], sigma);
+  }
+  alpha  ~ normal(0, 10);
+  beta   ~ normal(0, 10);
+  sigma  ~ exponential(1);
+}
+generated quantities {
+  vector[N] y_rep;
+  vector[N] log_lik;
+  for (n in 1:N) {
+    y_rep[n] = normal_rng(alpha + beta * x[n], sigma);
+    log_lik[n] = normal_lpdf(y[n] | alpha + beta * x[n], sigma);
+  }
+}
+"
+
+stan_data <- icecream %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = temp, 
+   y = units
+  )
+
+
+fit_normal <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_normal
+```
+
+
+```{r}
+y_rep <- as.matrix(fit_normal, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_data$units, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r}
+y_rep <- as.matrix(fit_normal, pars = "y_rep")
+bayesplot::ppc_intervals(y = stan_data$units, 
+                         yrep = y_rep, 
+                         x = stan_data$temp
+                         ) 
+```
+
+
+```{r}
+fit_normal %>% 
+  tidybayes::gather_draws(y_rep[i]) %>% 
+  mean_qi() %>% 
+  bind_cols(icecream) %>% 
+  
+  ggplot(aes(temp, units)) + 
+  geom_point(size = 5) +
+  geom_line(aes(y = .value), size = 2, color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3, 
+              fill = "gray50"
+              ) +
+  theme_classic()
+```
+
+## log normal models
+
+$$
+\begin{align}
+\log(y_n) &\sim \mathcal{Normal}(\mu_n, \,\, \sigma)\\
+\mu_n &= \alpha + \beta x_n 
+\end{align}
+$$
+equivalent to
+
+
+$$
+\begin{align}
+y_n &\sim \mathcal{Lognormal}(\mu_n, \,\, \sigma)\\
+\mu_n &= \alpha + \beta x_n 
+\end{align}
+$$
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;
+  int<lower=0> y[N];
+  vector[N] x;
+}
+parameters {
+  real alpha;
+  real beta;
+  real<lower=0> sigma;
+}
+model {
+
+  for(i in 1:N) {
+    target += lognormal_lpdf(y[i] | alpha + beta * x[i], sigma);
+  }
+  alpha  ~ normal(0, 10);
+  beta   ~ normal(0, 10);
+  sigma  ~ exponential(1);
+}
+generated quantities {
+  vector[N] y_rep;
+  vector[N] log_lik;
+  for (n in 1:N) {
+    y_rep[n] = lognormal_rng(alpha + beta * x[n], sigma);
+    log_lik[n] = lognormal_lpdf(y[n] | alpha + beta * x[n], sigma);
+  }
+}
+"
+
+stan_data <- icecream %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = temp, 
+   y = units
+  )
+
+
+fit_lognormal <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+fit_lognormal
+```
+
+
+```{r}
+y_rep <- as.matrix(fit_lognormal, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_data$units, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r}
+y_rep <- as.matrix(fit_lognormal, pars = "y_rep")
+bayesplot::ppc_intervals(y = stan_data$units, 
+                         yrep = y_rep, 
+                         x = stan_data$temp
+                         ) 
+```
+
+
+```{r}
+fit_lognormal %>% 
+  tidybayes::gather_draws(y_rep[i]) %>% 
+  mean_qi() %>% 
+  bind_cols(icecream) %>% 
+  
+  ggplot(aes(temp, units)) + 
+  geom_point(size = 5) +
+  geom_line(aes(y = .value), size = 2, color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3, 
+              fill = "gray50"
+              ) +
+  theme_classic()
+```
+
+
+## Poisson Models
+
+$$
+\begin{align}
+y_n &\sim \mathcal{Poisson}(\lambda_n)\\
+\log(\lambda_n) &= \alpha + \beta x_n 
+\end{align}
+$$
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  /*
+  * Alternative to poisson_log_rng() that 
+  * avoids potential numerical problems during warmup
+  */
+  int poisson_log_safe_rng(real eta) {
+    real pois_rate = exp(eta);
+    if (pois_rate >= exp(20.79))
+      return -9;
+    return poisson_rng(pois_rate);
+  }
+}
+data {
+  int N;
+  int<lower=0> y[N];
+  vector[N] x;
+}
+parameters {
+  real alpha;
+  real beta;
+}
+model {
+
+  for(i in 1:N) {
+    target += poisson_log_lpmf(y[i] | alpha + beta * x[i]);
+  }
+  alpha  ~ normal(0, 10);
+  beta   ~ normal(0, 10);
+}
+generated quantities {
+  int y_rep[N];
+  vector[N] log_lik;
+  for (n in 1:N) {
+    y_rep[n] = poisson_log_safe_rng(alpha + beta * x[n]);
+    log_lik[n] = poisson_log_lpmf(y[n] | alpha + beta * x[n]);
+  }
+}
+"
+
+stan_data <- icecream %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = temp, 
+   y = units
+  )
+
+
+fit_poisson <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+rstan::traceplot(fit_poisson)
+```
+
+
+```{r}
+fit_poisson
+```
+
+
+```{r}
+y_rep <- as.matrix(fit_poisson, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_data$units, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r}
+y_rep <- as.matrix(fit_poisson, pars = "y_rep")
+bayesplot::ppc_intervals(y = stan_data$units, 
+                         yrep = y_rep, 
+                         x = stan_data$temp
+                         ) 
+```
+
+
+```{r}
+fit_poisson %>% 
+  tidybayes::gather_draws(y_rep[i]) %>% 
+  mean_qi() %>% 
+  bind_cols(icecream) %>% 
+  
+  ggplot(aes(temp, units)) + 
+  geom_point(size = 5) +
+  geom_line(aes(y = .value), size = 2, color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3, 
+              fill = "gray50"
+              ) +
+  theme_classic()
+```
+
+
+
+
+## binomal models
+
+$$
+\begin{align}
+y_n &\sim \mathcal{binomial}(N, \theta_n)\\
+\text{logit}(\theta_n) &= log\Big(\frac{\theta_{n}}{1 - \theta_{n}}\Big) =\alpha + \beta x_n \\
+\text{equivalent to,} \quad \theta_n &= \frac{1}{1 + \exp[- (\alpha + \beta x_n)]} \\
+& = \frac{\exp(\alpha + \beta x_n)}{1 + \exp (\alpha + \beta x_n)} \\
+\end{align}
+$$
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;
+  int<lower=1> trials;
+  vector[N] x;
+  int y[N];
+  real new_x;
+}
+parameters {
+  real alpha;
+  real beta;
+}
+transformed parameters {
+  vector[N] theta;
+  for (i in 1:N) {
+    theta[i] = alpha + beta * x[i];
+  }
+}
+model {
+  for (i in 1:N) {
+    target += binomial_logit_lpmf(y[i] | trials, theta[i]);
+  }
+  
+  target += cauchy_lpdf(alpha | 0, 5);
+  target += normal_lpdf(beta | 0, 5);
+} 
+generated quantities {
+  vector[N] log_lik;
+  int y_rep[N];
+  int y_predict;
+
+  for(n in 1:N) {
+    log_lik[n] = binomial_logit_lpmf(y[n] | trials, theta[n]);
+  }
+  
+  for (n in 1:N) {
+     y_rep[n] = binomial_rng(trials, inv_logit(theta[n]));
+  }
+   //predict unit for temp = 35
+
+   y_predict = binomial_rng(trials, inv_logit(alpha + beta * new_x));
+}
+"
+
+
+stan_data <- icecream %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   x = temp, 
+   y = units, 
+   trials = 800,
+   new_x = 35
+  )
+
+fit_binomial <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+fit_binomial
+```
+
+
+
+```{r}
+y_rep <- as.matrix(fit_binomial, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_data$units, yrep = y_rep[1:200, ])
+```
+
+
+
+```{r}
+bayesplot::ppc_intervals(y = stan_data$units, 
+                         yrep = y_rep, 
+                         x = stan_data$temp
+                         ) 
+```
+
+
+
+
+```{r}
+fit_binomial %>% 
+  tidybayes::gather_draws(y_rep[i]) %>% 
+  mean_qi() %>% 
+  bind_cols(icecream) %>% 
+  
+  ggplot(aes(temp, units)) + 
+  geom_point(size = 5) +
+  geom_line(aes(y = .value), size = 2, color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.3, 
+              fill = "gray50"
+              ) +
+  theme_classic()
+```
+
+## 模型比较
+
+### LOO-CV
+
+The printed output from the loo function shows the estimates
+
+- elpd_loo (expected log predictive density), 
+- p_loo  (effective number of parameters),
+- looic = −2elpd_loo (the LOO information criterion).
+
+```{r}
+loo_normal <- loo::loo(loo::extract_log_lik(fit_normal))
+loo_normal
+```
+
+```{r}
+loo_lognormal <- loo::loo(loo::extract_log_lik(fit_lognormal))
+loo_lognormal
+```
+
+```{r}
+loo_poisson <- loo::loo(loo::extract_log_lik(fit_poisson))
+loo_poisson
+```
+
+```{r}
+loo_binomial <- loo::loo(loo::extract_log_lik(fit_binomial))
+loo_binomial
+```
+
+```{r}
+loo::compare(loo_normal, loo_lognormal, loo_poisson, loo_binomial)
+```
+
+
+第1列显示的是，每个模型的elpd，与模型中最大的elpd值，的差，
+因为，熵代表的是一种距离，越大说明不确定性越大。
+那么这里elpd越小（排最上面的），说明这个模型相对最优。
+
+
+
+# WAIC
+
+```{r}
+compare(
+  loo::waic(loo::extract_log_lik(fit_normal)),
+  loo::waic(loo::extract_log_lik(fit_lognormal)),
+  loo::waic(loo::extract_log_lik(fit_poisson)),
+  loo::waic(loo::extract_log_lik(fit_binomial))
+)
+```
+```{r}
+m <- matrix(runif(9, 1,20), ncol =3)
+v1 <- 1:6
+v2 <- c(2, 1, 4, 1, 7, 1)
+pmax(v1, v2)
+```
+
+在气温35度的时候， 我们库存多少冰激凌，才能实现，利润最大化？
+
+- 给定一个库存值，贝叶斯模型预测的是4000个 弄一个均值，然后效能函数得到值，
+- 现在变化库存bought值，得到一条曲线 
+
+```{r}
+#rstan::extract(fit_binomial, pars = "y_predict")
+y_predict <- fit_binomial %>% 
+  tidybayes::spread_draws(y_predict) %>% 
+  pull(y_predict)
+y_predict
+```
+
+```{r}
+utility_fun <- function(sales_predict, bought, temp) {
+  tibble(
+    bought  = bought, 
+    utility = -100 - 1 * bought + 2 * pmin(sales_predict, bought)
+  )
+}
+
+
+bought <- 700:800
+df <- bought %>%
+  map_df(
+    ~utility_fun(sales_predict = y_predict, bought = ., temp = 35)
+    ) %>% 
+  group_by(bought) %>% 
+  summarise(
+    utility = mean(utility)
+  )
+  
+df
+```
+
+
+```{r}
+df %>%
+  ggplot(aes(bought, utility)) +
+  geom_smooth(stat = "identity") 
+```
+
+
+
+## PPC 
+
+See this vignette for extracting information from a `stanfit` object: 
+
+http://mc-stan.org/rstan/articles/stanfit_objects.html
+
+```{r}
+yrep_pois <- rstan::extract(poisson_fit, pars = "y_rep")$y_rep
+yrep_pois_alt <- as.matrix(poisson_fit, pars = "y_rep")
+# extract() permutes the order of the draws, 
+# so these two matrices aren't in the same order
+
+ppc_dens_overlay(y = d$y, yrep = yrep_pois[1:50, ]) + xlim(0, 100)
+# changing xlim to ignore the long tail
+```
+
+```{r}
+yrep_nb <- rstan::extract(neg_binomial_fit, pars = "y_rep")$y_rep
+yrep_pois_alt <- as.matrix(neg_binomial_fit, pars = "y_rep")
+# extract() permutes the order of the draws, 
+# so these two matrices aren't in the same order
+
+ppc_dens_overlay(y = d$y, yrep = yrep_nb[1:50, ]) + xlim(0, 100)
+# changing xlim to ignore the VERY long tail
+```

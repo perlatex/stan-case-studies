@@ -1,0 +1,99 @@
+--- 
+title: "贝叶斯数据分析案例"
+author: "王敏杰"
+date: "`r Sys.Date()`"
+documentclass: ctexbook
+output:
+  bookdown::gitbook:
+    df_print: paged
+bibliography: [bayes.bib]
+biblio-style: apalike
+link-citations: yes
+colorlinks: yes
+lot: yes
+lof: yes
+geometry: [a4paper, tmargin=2.5cm, bmargin=2.5cm, lmargin=2cm, rmargin=2cm]
+site: bookdown::bookdown_site
+description: "一个简单的中文书示例。"
+github-repo: perlatex/Bayesian-Statistics-using-R-and-Stan
+always_allow_html: yes
+---
+
+
+
+```{r setup, include=FALSE}
+options(digits = 4, 
+        dplyr.print_min = 6, 
+        dplyr.print_max = 6,
+        htmltools.dir.version = FALSE, 
+        formatR.indent = 2, 
+        width = 55
+        )
+knitr::opts_chunk$set(
+                      echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      fig.width = 6, 
+                      fig.height = 4,
+                      fig.showtext = TRUE
+                      )
+```
+
+
+# 前言 {-}
+
+相比于传统的方法来说，Stan建模具有更好的可操作性、透明性和可解释性。因此本文档的目的是通过一些贝叶斯数据分析的案例，让大家了解[Stan](https://mc-stan.org/)的强大和价值。
+
+>> 对R不是很喜欢，直到遇到tidyverse；对统计很抗拒，直到遇到Stan
+
+
+
+
+## 关于内容 {-}
+
+每个章节研究的内容都是彼此独立的，大家可以单独阅读每章及运行代码。
+
+- 第 \@ref(movies) 章人们会给爱情片打高分？
+- 第 \@ref(height-weight) 章身高与体重
+- 第 \@ref(cancer) 章吸烟有害健康吗？
+- 第 \@ref(icecream) 章冰淇淋销量
+- 第 \@ref(lefthanded) 章女性左撇子比男性左撇子多？
+- 第 \@ref(NASA) 章航天事业的预算有党派门户之见？
+- 第 \@ref(vaccine) 章疫苗有效性的计算
+- 第 \@ref(complaints) 章物业经理的困惑蟑螂投诉的案例
+- 第 \@ref(wait-coffe) 章咖啡等待时间
+- 第 \@ref(sleepstudy) 章睡眠剥夺后的反应时间
+- 第 \@ref(homicides) 章在人口普查上估计凶杀案数量 
+- 第 \@ref(sir) 章流行病模型
+- 第 \@ref(nonlinear) 章非线性模型
+
+
+
+
+## 用到的宏包 {-}
+
+```{r index-3, eval = FALSE}
+my_packages <- 
+  c("tidyverse", "rstan", "tidybayes", "bayesplot", "loo", "broom.mixed")
+```
+
+```{r index-4, eval = FALSE}
+install.packages(my_packages, repos = "http://cran.rstudio.com", dependencies = T)
+```
+
+## RYouWithMe {-}
+
+```{r index-6, echo = FALSE, out.width = "30%"}
+knitr::include_graphics("images/QQgroup.png")
+```
+
+
+## 致谢 {-}
+
+非常感谢川师研究生院的信任，有了您的支持，才会有更多的川师学子了解R的美！
+
+```{block2 index-7, type='flushright', html.tag='p'}
+王敏杰  
+于 川师图书馆某角落
+```
+

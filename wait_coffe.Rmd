@@ -1,0 +1,839 @@
+# 咖啡等待时间 {#wait-coffe}
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(patchwork)
+options(mc.cores = 4)
+```
+
+# Section 14.1: Varying slopes by construction
+
+```{r}
+a       <-  3.5  # average morning wait time
+b       <- -1    # average difference afternoon wait time
+sigma_a <-  1    # std dev in intercepts
+sigma_b <-  0.5  # std dev in slopes
+rho     <- -.7   # correlation between intercepts and slopes
+# the next three lines of code simply combine the terms, above
+mu     <- c(a, b)
+cov_ab <- sigma_a * sigma_b * rho
+sigma  <- matrix(c(sigma_a^2, cov_ab, 
+                   cov_ab, sigma_b^2), ncol = 2)
+```
+
+
+
+```{r, message = F, warning = F}
+sigmas <- c(sigma_a, sigma_b)          # standard deviations
+rho    <- matrix(c(1, rho,             # correlation matrix
+                   rho, 1), nrow = 2)
+# now matrix multiply to get covariance matrix
+sigma <- diag(sigmas) %*% rho %*% diag(sigmas)
+# how many cafes would you like?
+n_cafes <- 20
+set.seed(5)  # used to replicate example
+vary_effects <- 
+  MASS::mvrnorm(n_cafes, mu, sigma) %>% 
+  data.frame() %>% 
+  set_names("a_cafe", "b_cafe")
+head(vary_effects)
+```
+
+
+
+```{r}
+n_visits <- 10
+sigma    <-  0.5  # std dev within cafes
+set.seed(22)  # used to replicate example
+d <-
+  vary_effects %>% 
+  mutate(cafe = 1:n_cafes) %>% 
+  expand(nesting(cafe, a_cafe, b_cafe), visit = 1:n_visits) %>% 
+  mutate(afternoon = rep(0:1, times = n() / 2)) %>% 
+  mutate(mu = a_cafe + b_cafe * afternoon) %>% 
+  mutate(wait = rnorm(n = n(), mean = mu, sd = sigma))
+```
+
+We might peek at the data.
+
+```{r}
+d %>%
+  glimpse()
+```
+```{r}
+d1 <- d %>% select(wait, afternoon, cafe)
+d1
+```
+
+
+```{r}
+d1 %>% write_rds("./data/cafe.rds")
+```
+
+
+
+
+
+```{r}
+d <- readr::read_rds("./data/cafe.rds")
+```
+
+
+
+
+
+### The varying slopes model.
+
+The statistical formula for our varying intercepts and slopes café model follows the form
+
+
+$$
+\begin{align*}
+\text{wait}_i & \sim \operatorname{Normal}(\mu_i, \sigma) \\
+\mu_i         & = \alpha_{\text{café}[i]} + \beta_{\text{café}[i]} \text{afternoon}_i \\
+\begin{bmatrix} \alpha_\text{café} \\ \beta_\text{café} \end{bmatrix} & \sim \operatorname{MVNormal} \begin{pmatrix} \begin{bmatrix} \alpha \\ \beta \end{bmatrix}, \mathbf{S} \end{pmatrix} \\
+\mathbf S     & = \begin{bmatrix} \sigma_\alpha & 0 \\ 0 & \sigma_\beta \end{bmatrix} \mathbf R \begin{bmatrix} \sigma_\alpha & 0 \\ 0 & \sigma_\beta \end{bmatrix} \\
+\alpha        & \sim \operatorname{Normal}(5, 2) \\
+\beta         & \sim \operatorname{Normal}(-1, 0.5) \\
+\sigma        & \sim \operatorname{Exponential}(1) \\
+\sigma_\alpha & \sim \operatorname{Exponential}(1) \\
+\sigma_\beta  & \sim \operatorname{Exponential}(1) \\
+\mathbf R     & \sim \operatorname{LKJcorr}(2),
+\end{align*}
+$$
+
+
+感觉这里没说清楚，比如$\alpha_{cafe[i]}$ 应该是两个，一个是固定效应，一个变化效应
+各自的分布是什么呢？
+
+
+
+
+stan2 很简洁
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;
+  int n_cafe;
+  int cafe[n];
+  vector[n] afternoon;
+  vector[n] wait;
+}
+parameters {
+  vector[n_cafe] a_cafe;
+  vector[n_cafe] b_cafe;
+  real a;
+  real b;
+  vector<lower=0>[2] sigma_cafe;
+  real<lower=0> sigma;
+  corr_matrix[2] Rho;
+}
+model {
+  vector[n] mu;
+  vector[2] YY[n_cafe];
+  vector[2] MU;
+  Rho ~ lkj_corr(2);
+  sigma ~ exponential(1);
+  sigma_cafe ~ exponential(1);
+  a ~ normal(5, 2);
+  b ~ normal(-1, .5);
+  MU = [a, b]';
+  for (j in 1:n_cafe) {
+    YY[j] = [a_cafe[j], b_cafe[j]]';
+  }
+  YY ~ multi_normal(MU, quad_form_diag(Rho, sigma_cafe));
+  mu = a_cafe[cafe] + b_cafe[cafe] .* afternoon;
+  wait ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- compose_data(d,
+ 		       n_cafe = n_distinct(cafe)
+ 		       )
+
+
+m14.1a <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+m14.1a
+```
+
+
+
+
+
+
+用stan1的代码， 结构比较清晰
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;               //多少观察值
+  int n_cafe;          //分了多少组
+  int cafe[n];
+  real wait[n];
+  int afternoon[n];
+}
+parameters {
+  real a;
+  real b;
+  vector[n_cafe] a_cafe;
+  vector[n_cafe] b_cafe;
+  vector<lower=0>[2] sigma_cafe;
+  real<lower=0> sigma;
+  corr_matrix[2] Rho;
+}
+transformed parameters {
+  vector[2] MU;
+  vector[2] v_a_cafe_b_cafe[n_cafe];
+  cov_matrix[2] SRS_sigma_cafeRho;
+  MU = [a, b]';
+  for (j in 1:n_cafe) v_a_cafe_b_cafe[j] = [a_cafe[j], b_cafe[j]]';
+  SRS_sigma_cafeRho = quad_form_diag(Rho, sigma_cafe);
+}
+model {
+  vector[n] mu;
+  
+ // priors
+ target += normal_lpdf(a| 5, 2);
+ target += normal_lpdf(b| -1, 0.5);
+ target += exponential_lpdf(sigma| 1);
+ target += exponential_lpdf(sigma_cafe| 1);
+ target += lkj_corr_lpdf(Rho| 2);
+ 
+ // linear model
+ for(i in 1:n) {
+   mu[i] = a_cafe[cafe[i]] + b_cafe[cafe[i]] * afternoon[i];
+ }
+ target += normal_lpdf(wait |mu, sigma);
+ target += multi_normal_lpdf(v_a_cafe_b_cafe | MU, SRS_sigma_cafeRho);
+}
+"
+
+stan_data <- d %>% 
+  tidybayes::compose_data(
+ 		n_cafe = n_distinct(cafe)
+ 	)
+
+
+m14.1b <- stan(model_code = stan_program, data = stan_data)
+
+```
+
+
+
+```{r}
+m14.1b
+```
+
+
+
+
+
+
+
+我的目的是：语法简介，结构也清晰
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;
+  int n_cafe;
+  int cafe[n];
+  vector[n] afternoon;
+  vector[n] wait;
+}
+parameters {
+  vector[n_cafe] a_cafe;
+  vector[n_cafe] b_cafe;
+  real a;
+  real b;
+  vector<lower=0>[2] sigma_cafe;
+  real<lower=0> sigma;
+  corr_matrix[2] Rho;
+}
+transformed parameters {
+  vector[2] YY[n_cafe];
+  vector[2] MU;
+  MU = [a, b]';
+  for (j in 1:n_cafe) {
+    YY[j] = [a_cafe[j], b_cafe[j]]';
+  }
+}
+model {
+  vector[n] mu;
+
+  sigma ~ exponential(1);
+  sigma_cafe ~ exponential(1);
+  a ~ normal(5, 2);
+  b ~ normal(-1, .5);
+  Rho ~ lkj_corr(2);
+  
+  mu = a_cafe[cafe] + b_cafe[cafe] .* afternoon;
+  
+  //YY ~ multi_normal(MU, quad_form_diag(Rho, sigma_cafe));
+  target += multi_normal_lpdf(YY | MU, quad_form_diag(Rho, sigma_cafe));
+  wait ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- d %>% 
+  tidybayes::compose_data(
+ 		n_cafe = n_distinct(cafe)
+ 	)
+
+
+m14.1c <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+m14.1c
+summary(m14.1c, c("Rho"))$summary
+```
+
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+datplot <- m14.1c %>% 
+           spread_draws(Rho[i, j]) %>%
+           filter(i == 1, j == 2)
+
+ggplot(datplot, aes(Rho)) +
+    geom_density() +
+    xlim(-1, 1) +
+    xlab('Correlation')
+```
+
+这里我用系数矩阵的方法写一遍
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+
+data {
+  int n;
+  int n_cafe;
+  int cafe[n];
+  vector[n] afternoon;
+  vector[n] wait;
+}
+parameters {
+  matrix[n_cafe, 2] a_cafe;
+  real a;
+  real b;
+  vector<lower=0>[2] sigma_cafe;
+  real<lower=0> sigma;
+  corr_matrix[2] Rho;
+}
+transformed parameters {
+  vector[2] YY[n_cafe];
+  vector[2] MU;
+  MU = [a, b]';
+}
+model {
+  vector[n] mu;
+  
+  sigma ~ exponential(1);
+  sigma_cafe ~ exponential(1);
+  a ~ normal(5, 2);
+  b ~ normal(-1, .5);
+  Rho ~ lkj_corr(2);
+  
+  for (i in 1:n) {
+   mu[i] = a_cafe[cafe[i], 1] + a_cafe[cafe[i], 2] * afternoon[i];
+  }
+  
+  for (j in 1:n_cafe) {
+    a_cafe[j, 1:2] ~ multi_normal(MU, quad_form_diag(Rho, sigma_cafe));
+   }
+  
+  wait ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- d %>% 
+  tidybayes::compose_data(
+ 		n_cafe = n_distinct(cafe)
+ 	)
+
+
+m14.1d <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+m14.1d
+```
+
+
+用模型矩阵+ 系数矩阵 both完成
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;           //obs
+  int K;           //num of coef including intercept
+  int n_cafe;      //group deepth levels
+  int cafe[n];     //group index
+
+  vector[n] wait;  //Y variables
+  matrix[n, K] X;  //model matrix
+}
+parameters {
+  matrix[n_cafe, K] coef;
+  real a;
+  real b;
+  vector<lower=0>[K] sigma_cafe;
+  real<lower=0> sigma;
+  corr_matrix[K] Rho;
+}
+transformed parameters {
+  vector[2] MU;
+  MU = [a, b]';
+}
+model {
+  vector[n] mu;
+  matrix[n, n_cafe] temp;
+  temp = X * coef';
+  
+  for (i in 1:n) {
+    mu[i] = temp[i, cafe[i]];
+  }
+  
+  sigma ~ exponential(1);
+  sigma_cafe ~ exponential(1);
+  a ~ normal(5, 2);
+  b ~ normal(-1, .5);
+  Rho ~ lkj_corr(2);
+  
+
+  for (j in 1:n_cafe) {
+    
+    coef[j, 1:2] ~ multi_normal(MU, quad_form_diag(Rho, sigma_cafe));
+    
+  }
+
+  wait ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- d %>% 
+  tidybayes::compose_data(
+    K = 2,
+    wait = wait,
+    n_cafe = n_distinct(cafe),
+    cafe = cafe,
+    X = model.matrix(~afternoon, .)
+  )
+
+
+m14.1e <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+m14.1e
+```
+
+
+
+## 用stan-book中的方法
+
+模型矩阵的数据 + `array of vector` 形式的系数
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int N;                      // number of obs
+  int K;                      // number of predictors
+  matrix[N, K] X;             // model_matrix
+  vector[N] y;                // y
+  int J;                      // number of grouping
+  int<lower=1, upper=J> g[N]; // index for grouping
+}
+parameters {
+  vector[K] beta[J];
+  vector[K] MU;
+  real<lower=0> sigma;
+  
+  vector<lower=0>[K] tau;
+  corr_matrix[K] Rho;
+}
+
+model {
+  vector[N] mu;
+
+  sigma ~ exponential(1);
+  tau ~ exponential(1);
+  Rho ~ lkj_corr(2);
+  
+  for(i in 1:N) {
+    mu[i] = X[i] * beta[g[i]];  
+  }
+  y ~ normal(mu, sigma); 
+  
+  beta ~ multi_normal(MU, quad_form_diag(Rho, tau));
+
+}
+"
+
+
+stan_data <- d %>% 
+  tidybayes::compose_data(
+    N = n,
+    K = 2,
+ 		J = n_distinct(cafe),
+    g = cafe,
+    y = wait,
+    X = model.matrix(~ 1 + afternoon, data = .)
+ 	)
+
+
+m14.1f <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+summary(m14.1c, c("a", "b"))$summary
+summary(m14.1f, c("MU"))$summary
+
+summary(m14.1c, c("a_cafe"))$summary
+summary(m14.1f, c("beta"))$summary
+```
+
+
+
+
+## 用brms
+```{r b14.1}
+b14.1 <- 
+  brm(data = d, 
+      family = gaussian,
+      wait ~ 1 + afternoon + (1 + afternoon | cafe),
+      prior = c(prior(normal(5, 2), class = Intercept),
+                prior(normal(-1, 0.5), class = b),
+                prior(exponential(1), class = sd),
+                prior(exponential(1), class = sigma),
+                prior(lkj(2), class = cor)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 867530,
+      file = "fits/b14.01")
+```
+
+
+
+
+## Advanced varying slopes
+
+In [Section 13.3][More than one type of cluster] we saw that data can be considered **cross-classified** if they have multiple grouping factors. We used the `chipanzees` data in that section and we only considered cross-cassification by single intercepts. Turns out cross-classified models can be extended further. Let's load and wrangle those data.
+
+
+```{r}
+df <- read_rds("data/chimpabzees.rds")
+df
+```
+
+
+```{r, warning = F, message = F}
+# treatment 弄成因子，事实上为了让tidybayes::compose_data()方便转化成数值，
+# 最后用stan 读成 int
+d <-
+  df %>% 
+  mutate(treatment = factor(1 + prosoc_left + 2 * condition)) #
+d
+```
+
+```{r}
+d %>% count(treatment)
+d %>% count(actor)
+d %>% count(block)
+```
+
+
+If I'm following along correctly with the text, McElreath's `m14.2` uses the centered parameterization. Recall from the last chapter that **brms** only supports the non-centered parameterization. Happily, McElreath's `m14.3` appears to use the non-centered parameterization. Thus, we'll skip making a `b14/2` and jump directly into making a `b14.3`. I believe one could describe the statistical model as
+
+$$
+\begin{align*}
+\text{left_pull}_i & \sim \operatorname{Binomial}(n_i = 1, p_i) \\
+\operatorname{logit} (p_i) & = \gamma_{\text{treatment}[i]} + \alpha_{\text{actor}[i], \text{treatment}[i]} + \beta_{\text{block}[i], \text{treatment}[i]} \\
+\gamma_j & \sim \operatorname{Normal}(0, 1), \;\;\; \text{for } j = 1..4 \\
+\begin{bmatrix} \alpha_{j, 1} \\ \alpha_{j, 2} \\ \alpha_{j, 3} \\ \alpha_{j, 4} \end{bmatrix} & \sim \operatorname{MVNormal} \begin{pmatrix} \begin{bmatrix} 0 \\ 0 \\ 0 \\ 0 \end{bmatrix}, \mathbf \Sigma_\text{actor} \end{pmatrix} \\
+\begin{bmatrix} \beta_{j, 1} \\ \beta_{j, 2} \\ \beta_{j, 3} \\ \beta_{j, 4} \end{bmatrix} & \sim \operatorname{MVNormal} \begin{pmatrix} \begin{bmatrix} 0 \\ 0 \\ 0 \\ 0 \end{bmatrix}, \mathbf \Sigma_\text{block} \end{pmatrix} \\
+\mathbf \Sigma_\text{actor} & = \mathbf{S_\alpha R_\alpha S_\alpha} \\
+\mathbf \Sigma_\text{block} & = \mathbf{S_\beta R_\beta S_\beta} \\
+\sigma_{\alpha, [1]}, ..., \sigma_{\alpha, [4]} & \sim \operatorname{Exponential}(1) \\
+\sigma_{\beta, [1]}, ..., \sigma_{\beta, [4]}   & \sim \operatorname{Exponential}(1) \\
+\mathbf R_\alpha & \sim \operatorname{LKJ}(2) \\
+\mathbf R_\beta  & \sim \operatorname{LKJ}(2).
+\end{align*}
+$$
+```{r}
+glimpse(d)
+```
+
+
+
+先自己写，好像不能用block 这个在stan有特殊含义，所以改为block_id
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;
+  int n_actors;
+  int n_blocks;
+  int n_treatment;
+  int actor[n];
+  int block_id[n];
+  int treatment[n];
+  int pulled_left[n];
+}
+parameters {
+    vector[n_treatment] gamma;
+    vector[n_treatment] alpha[n_actors];
+    vector[n_treatment] beta[n_blocks];
+    vector<lower=0>[4] sigma_actor;  
+    vector<lower=0>[4] sigma_block;   
+    corr_matrix[4] rho_actor;
+    corr_matrix[4] rho_block;
+}
+
+model {
+    vector[n] p;
+    gamma ~ normal(0, 1);
+    sigma_actor ~ exponential(1);
+    sigma_block ~ exponential(1);
+    rho_actor ~ lkj_corr(4);
+    rho_block ~ lkj_corr(4);
+   
+  for (i in 1:n) {
+   p[i] = gamma[treatment[i]] + 
+          alpha[actor[i], treatment[i]] + 
+          beta[block_id[i], treatment[i]];
+         
+   p[i] = inv_logit(p[i]);
+  }
+  
+  //alpha ~ multi_normal(rep_vector(0, 4), 
+  //                    quad_form_diag(rho_actor, sigma_actor));
+  //beta ~ multi_normal(rep_vector(0, 4), 
+  //                    quad_form_diag(rho_block, sigma_block));
+
+  for(j in 1:n_actors) {
+    alpha[j] ~ multi_normal(rep_vector(0, 4), quad_form_diag(rho_actor, sigma_actor));
+  }
+    for(j in 1:n_blocks){
+      beta[j] ~ multi_normal(rep_vector(0, 4), quad_form_diag(rho_block, sigma_block));
+    }
+  
+  
+  pulled_left ~ binomial(1, p); 
+}
+"
+
+stan_data <- d %>%
+  rename(block_id = block) %>%
+  tidybayes::compose_data(
+    	n_actors = n_distinct(actor),
+    	n_blocks = n_distinct(block_id),
+    	n_treatment = n_distinct(treatment)
+  )
+
+
+m14.2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+m14.2
+```
+
+
+
+用矩阵matrix装系数也是一样的效果
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int n;
+  int n_actors;
+  int n_blocks;
+  int n_treatment;
+  int actor[n];
+  int block_id[n];
+  int treatment[n];
+  int pulled_left[n];
+}
+parameters {
+    vector[n_treatment] gamma;
+    
+    matrix[n_actors, n_treatment] alpha;
+    matrix[n_blocks, n_treatment] beta;
+    
+
+    vector<lower=0>[n_treatment] sigma_actor;  
+    vector<lower=0>[n_treatment] sigma_block;   
+
+    corr_matrix[n_treatment] rho_actor;
+    corr_matrix[n_treatment] rho_block;
+}
+
+model {
+    vector[n] p;
+    
+    gamma ~ normal(0,1);
+    sigma_actor ~ exponential(1); 
+    sigma_block ~ exponential(1);
+    rho_actor ~ lkj_corr(2);
+    rho_block ~ lkj_corr(2);
+    
+   
+   for (i in 1:n) {
+   p[i] = gamma[treatment[i]] + 
+          alpha[actor[i], treatment[i]] + 
+          beta[block_id[i], treatment[i]];
+         
+   p[i] = inv_logit(p[i]);
+  }
+  
+   for(j in 1:n_actors) {
+    alpha[j] ~ multi_normal(rep_vector(0, 4), quad_form_diag(rho_actor, sigma_actor));
+  }
+    for(j in 1:n_blocks){
+      beta[j] ~ multi_normal(rep_vector(0, 4), quad_form_diag(rho_block, sigma_block));
+  }
+     
+  pulled_left ~ binomial(1, p); 
+}
+"
+
+stan_data <- d %>%
+  rename(block_id = block) %>%
+  tidybayes::compose_data(
+    	n_actors = n_distinct(actor),
+    	n_blocks = n_distinct(block_id),
+    	n_treatment = n_distinct(treatment)
+  )
+
+
+m14.2a <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+m14.2a
+```
+
+
+
+
+
+## 模型14.3
+这个的数学公式在哪里？
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int n;
+  int n_actors;
+  int n_blocks;
+  int n_treatment;
+  int actor[n];
+  int block_id[n];
+  int treatment[n];
+  int pulled_left[n];
+}
+parameters {
+   matrix[n_treatment, n_actors] z_actor;
+   matrix[n_treatment, n_blocks] z_block;
+   vector[n_treatment] g; 
+   vector<lower=0>[n_treatment] sigma_actor;
+   vector<lower=0>[n_treatment] sigma_block;
+   cholesky_factor_corr[n_treatment] L_Rho_block;
+   cholesky_factor_corr[n_treatment] L_Rho_actor;
+}
+transformed parameters {
+   matrix[n_actors, n_treatment] alpha;
+   matrix[n_blocks, n_treatment] beta;
+   beta = (diag_pre_multiply(sigma_block, L_Rho_block) * z_block)';
+   alpha = (diag_pre_multiply(sigma_actor, L_Rho_actor) * z_actor)';
+}
+model{
+    vector[n] p;
+    L_Rho_block ~ lkj_corr_cholesky( 2 );
+    sigma_block ~ exponential( 1 );
+    L_Rho_actor ~ lkj_corr_cholesky( 2 );
+    sigma_actor ~ exponential( 1 );
+    g ~ normal( 0 , 1 );
+    to_vector( z_block ) ~ normal( 0 , 1 );
+    to_vector( z_actor ) ~ normal( 0 , 1 );
+    for ( i in 1:n ) {
+        p[i] = g[treatment[i]] + alpha[actor[i], treatment[i]] + beta[block_id[i], treatment[i]];
+        p[i] = inv_logit(p[i]);
+    }
+    pulled_left ~ binomial( 1 , p );
+}
+"
+
+
+stan_data <- d %>%
+  rename(block_id = block) %>%
+  tidybayes::compose_data(
+    	n_actors = n_distinct(actor),
+    	n_blocks = n_distinct(block_id),
+    	n_treatment = n_distinct(treatment)
+  )
+
+
+
+m14.3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+m14.3
+```
+
+
+
+
+brms版本
+```{r, warning = F, message = F}
+# wrangle.
+d1 <-
+  df %>% 
+  mutate(actor     = factor(actor),
+         block     = factor(block),
+         treatment = factor(1 + prosoc_left + 2 * condition),
+         # this will come in handy, later
+         labels    = factor(treatment,
+                            levels = 1:4,
+                            labels = c("r/n", "l/n", "r/p", "l/p")))
+d1
+```
+
+
+```{r b14.3}
+b14.3 <- 
+  brm(data = d1, 
+      family = binomial,
+      pulled_left | trials(1) ~ 0 + treatment + (0 + treatment | actor) + (0 + treatment | block),
+      prior = c(prior(normal(0, 1), class = b),
+                prior(exponential(1), class = sd, group = actor),
+                prior(exponential(1), class = sd, group = block),
+                prior(lkj(2), class = cor, group = actor),
+                prior(lkj(2), class = cor, group = block)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,  
+      seed = 4387510,
+      file = "fits/b14.03")
+```
+
+
+```{r}
+b14.3 
+```
+

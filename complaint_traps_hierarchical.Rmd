@@ -1,0 +1,677 @@
+# 物业经理的困惑 {#complaints}
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+蟑螂投诉的案例，
+一方面担心投诉太多降低威望，一方面担心部署太多蟑螂诱捕器需要花费太多费用
+
+## 数据
+
+```{r}
+pest <- readRDS("./data/pest_data.RDS")
+pest
+```
+
+```{r}
+pest %>% count(building_id, live_in_super)
+```
+
+## Hierarchical modeling
+
+modeling varying intercepts for each building
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  /*
+  * Alternative to neg_binomial_2_log_rng() that 
+  * avoids potential numerical problems during warmup
+  */
+  int neg_binomial_2_log_safe_rng(real eta, real phi) {
+    real gamma_rate = gamma_rng(phi, phi / exp(eta));
+    if (gamma_rate >= exp(20.79))
+      return -9;     
+    return poisson_rng(gamma_rate);
+  }
+}
+data {
+  int<lower=1> N;
+  int complaints[N];
+  int traps[N];
+  int n_building;
+  int building[N];
+  vector<lower=0,upper=1>[N] live_in_super;
+  vector[N] log_sq_foot;
+}
+parameters {
+  vector[n_building] alpha;
+  real beta;
+  real beta_super;
+  real<lower=0> inv_phi;
+}
+transformed parameters {
+  real phi = inv(inv_phi);
+}
+model {
+  vector[N] lambda;
+  for (i in 1:N) {
+    lambda[i] = alpha[building[i]] + beta * traps[i] + beta_super * live_in_super[i] + log_sq_foot[i];
+  }
+
+  
+  for (i in 1:N) {
+    target += neg_binomial_2_log_lpmf(complaints[i] | lambda[i], phi);
+  }
+  
+  alpha ~ normal(log(4), 1);
+  beta ~ normal(-0.25, 1);
+  beta_super ~ normal(-0.5, 1);
+  inv_phi ~ normal(0, 1); 
+
+  
+} 
+generated quantities {
+  int y_rep[N];
+  for (n in 1:N) {
+    y_rep[n] = neg_binomial_2_log_safe_rng(alpha[building[n]] + beta * traps[n] + beta_super * live_in_super[n] + log_sq_foot[n], phi);
+  }
+}
+"
+
+
+
+stan_data <- pest %>% 
+  select(complaints, traps, building_id, live_in_super, total_sq_foot) %>% 
+  mutate(log_sq_foot  = log(total_sq_foot/1e4)) %>% 
+  mutate(building_id  = as_factor(building_id)) %>% #compose_data() convert factors into `int` for grouping
+  
+  tidybayes::compose_data(
+  N             = nrow(.), 
+  complaints    = complaints,
+  traps         = traps,
+  live_in_super = live_in_super,
+  log_sq_foot   = log_sq_foot,
+  n_building    = n_distinct(building_id),
+  building      = building_id
+ )
+
+
+fit_pest_Hierarchical <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+
+$$
+\text{complaints}_{b,t} \sim \text{Neg-Binomial}(\lambda_{b,t}, \phi) \\
+\lambda_{b,t}  = \exp{(\eta_{b,t})} \\
+\eta_{b,t} = \mu_b + \beta \, {\rm traps} + \text{log}\_\textrm{sq}\_\textrm{foot}\\
+\mu_b \sim \text{normal}(\alpha + \texttt{building}\_\textrm{data} \, \zeta, \,\sigma_{\mu})
+$$
+
+
+
+
+
+
+
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  /*
+  * Alternative to neg_binomial_2_log_rng() that 
+  * avoids potential numerical problems during warmup
+  */
+  int neg_binomial_2_log_safe_rng(real eta, real phi) {
+    real gamma_rate = gamma_rng(phi, phi / exp(eta));
+    if (gamma_rate >= exp(20.79))
+      return -9;      
+    return poisson_rng(gamma_rate);
+  }
+}
+
+data {
+  int<lower=1> N;
+  int<lower=0> complaints[N]; 
+  int traps[N];
+  int<lower=1> n_building;
+  int<lower=1, upper=n_building> building[N];
+  vector[N] log_sq_foot;
+  matrix[n_building,4] building_data;
+}
+
+
+parameters {
+  real<lower=0> inv_phi;   // 1/phi (easier to think about prior for 1/phi instead of phi)
+  real beta;               // coefficient on traps
+  vector[n_building] mu;   // buildings-specific intercepts
+  real<lower=0> sigma_mu;  // sd of building-specific intercepts
+  real alpha;              // intercept of model for mu
+  vector[4] zeta;          // coefficients on building-level predictors in model for mu 
+}
+transformed parameters {
+  real phi = inv(inv_phi);
+}
+
+
+model {
+
+  sigma_mu ~ normal(0, 1);
+  alpha ~ normal(log(4), 1);
+  zeta ~ normal(0, 1);      // could also use informative priors on the different elements
+  beta ~ normal(-0.25, 1);
+  inv_phi ~ normal(0, 1);
+
+  
+  //for (j in 1:n_building) {
+  //  mu[j] ~ normal(alpha + building_data[j, ]  * zeta, sigma_mu);
+  //}
+  mu ~ normal(alpha + building_data * zeta, sigma_mu);
+  
+  for (i in 1:N) {
+    target += neg_binomial_2_log_lpmf(complaints[i] | mu[building[i]] + beta * traps[i] + log_sq_foot[i], phi);
+  }
+  
+
+} 
+generated quantities {
+  int y_rep[N];
+  for (n in 1:N) {
+    y_rep[n] = neg_binomial_2_log_safe_rng(mu[building[n]] + beta * traps[n] + log_sq_foot[n], phi);
+  }
+}
+"
+```
+
+
+```{r prep-data}
+N_buildings <- length(unique(pest$building_id))
+N_months    <- length(unique(pest$date))
+
+#
+building_data <- pest %>%
+  mutate(
+    building_fac = factor(building_id, levels = unique(building_id)),
+    building_idx = as.integer(building_fac),
+    ids = rep(1:N_months, N_buildings),
+    month_idx = lubridate::month(date)
+  ) %>% 
+    select(building_idx, 
+           live_in_super, 
+           age_of_building,
+           total_sq_foot, 
+           average_tenant_age, 
+           monthly_average_rent) %>%
+    distinct() %>%
+    arrange(building_idx) %>%
+    select(-building_idx) %>%
+    mutate(
+    across(everything(), scale, scale = FALSE)
+    ) %>% 
+    mutate( # scale by constants
+      age_of_building = age_of_building / 10,
+      total_sq_foot = total_sq_foot / 10000,              # not used
+      average_tenant_age = average_tenant_age / 10,
+      monthly_average_rent = monthly_average_rent / 1000
+    ) %>%
+    as.matrix()
+
+building_data
+building_data[, -3]
+```
+
+
+
+
+```{r}
+stan_data <- pest %>% 
+  select(complaints, traps, building_id, total_sq_foot) %>% 
+  mutate(log_sq_foot  = log(total_sq_foot/1e4)) %>% 
+  mutate(building_id  = as_factor(building_id)) %>% 
+  
+  
+  tidybayes::compose_data(
+  N             = nrow(.), 
+  complaints    = complaints,
+  traps         = traps,
+  log_sq_foot   = log_sq_foot,
+  n_building    = n_distinct(building_id),
+  building      = building_id,
+  building_data = building_data[,-3],
+ )
+
+fitted_model_NB_hier <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+有效样本都很低， 
+
+```{r}
+fitted_model_NB_hier %>% 
+  print(pars = c('sigma_mu','beta','alpha','phi','mu'))
+```
+
+我们先看trace plots
+
+```{r}
+# use as.array to keep the markov chains separate for trace plots
+bayesplot::mcmc_trace(as.array(fitted_model_NB_hier, pars = 'sigma_mu'),
+  np = nuts_params(fitted_model_NB_hier), window = c(500,1000)
+)
+```
+Looks as if the divergent parameters, the little red bars underneath
+the traceplots correspond to samples where the sampler gets stuck at
+one parameter value for $\sigma_\mu$.
+
+
+
+### want this to look more like a funnel than a cloud
+
+What we have here is a cloud-like shape, with most of the divergences
+clustering towards the bottom. We'll see a bit later that we actually
+want this to look more like a funnel than a cloud.
+
+```{r}
+# assign to object so we can compare to another plot later
+scatter_with_divs <- bayesplot::mcmc_scatter(as.array(fitted_model_NB_hier),
+  pars = c("mu[4]", 'sigma_mu'),
+  transform = list('sigma_mu' = "log"), np = nuts_params(fitted_model_NB_hier)
+)
+scatter_with_divs
+```
+
+这是我们期待的漏斗图（因为是我们模拟的）
+
+```{r}
+d_sim <- tibble(
+    log_sigma = rnorm(1000, mean = 0, sd = 1)
+) %>%
+  mutate(
+    theta = map_dbl(log_sigma, ~ rnorm(1, mean = 0, sd = exp(.x)))
+  )
+d_sim
+
+d_sim %>% 
+  ggplot(aes(x = log_sigma, y = theta)) +
+  geom_point()
+```
+
+```{r}
+N_sims <- 1000
+log_sigma <- rep(NA, N_sims)
+theta <- rep(NA, N_sims)
+for (j in 1:N_sims) {
+  log_sigma[j] <- rnorm(1, mean = 0, sd = 1)
+  theta[j] <- rnorm(1, mean = 0, sd = exp(log_sigma[j]))
+}
+draws <- cbind("mu" = theta, "log(sigma_mu)" = log_sigma)
+bayesplot::mcmc_scatter(draws)
+```
+
+
+```{r}
+parcoord_with_divs <-
+  bayesplot::mcmc_parcoord(as.array(fitted_model_NB_hier, pars = c("sigma_mu", "mu")),
+  np = nuts_params(fitted_model_NB_hier))
+parcoord_with_divs
+```
+
+
+
+## hier_NB_regression_ncp
+上面的分析，发现有效样本量比较低，原因是sigma_mu 太小，所以作者这里Reparameterizing,
+
+$$
+\text{complaints}_{b,t} \sim \text{Neg-Binomial}(\lambda_{b,t}, \phi) \\
+\lambda_{b,t}  = \exp{(\eta_{b,t})} \\
+\eta_{b,t} = \mu_b + \beta \, {\rm traps} + \text{log}\_\textrm{sq}\_\textrm{foot}\\
+\mu_b \sim \text{normal}(\alpha + \texttt{building}\_\textrm{data} \, \zeta, \,\sigma_{\mu})
+$$
+
+
+
+
+
+
+
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  /*
+  * Alternative to neg_binomial_2_log_rng() that 
+  * avoids potential numerical problems during warmup
+  */
+  int neg_binomial_2_log_safe_rng(real eta, real phi) {
+    real gamma_rate = gamma_rng(phi, phi / exp(eta));
+    if (gamma_rate >= exp(20.79))
+      return -9;      
+    return poisson_rng(gamma_rate);
+  }
+}
+
+data {
+  int<lower=1> N;
+  int<lower=0> complaints[N]; 
+  int traps[N];
+  int<lower=1> n_building;
+  int<lower=1, upper=n_building> building[N];
+  vector[N] log_sq_foot;
+  matrix[n_building,4] building_data;
+}
+
+
+parameters {
+  real<lower=0> inv_phi;   // 1/phi (easier to think about prior for 1/phi instead of phi)
+  real beta;               // coefficient on traps
+  real<lower=0> sigma_mu;  // sd of building-specific intercepts
+  real alpha;              // intercept of model for mu
+  vector[4] zeta;          // coefficients on building-level predictors in model for mu 
+  vector[n_building] mu_raw;
+}
+transformed parameters {
+  real phi = inv(inv_phi);
+  vector[n_building] mu;
+  mu = alpha + building_data * zeta + sigma_mu * mu_raw;
+}
+
+
+model {
+
+  sigma_mu ~ normal(0, 1);
+  alpha ~ normal(log(4), 1);
+  zeta ~ normal(0, 1);      // could also use informative priors on the different elements
+  beta ~ normal(-0.25, 1);
+  inv_phi ~ normal(0, 1);
+  mu_raw ~ normal(0, 1);    // implies mu ~ normal(alpha + building_data * zeta, sigma_mu)
+  
+  
+  for (i in 1:N) {
+    target += neg_binomial_2_log_lpmf(complaints[i] | mu[building[i]] + beta * traps[i] + log_sq_foot[i], phi);
+  }
+  
+
+} 
+generated quantities {
+  int y_rep[N];
+  for (n in 1:N) {
+    y_rep[n] = neg_binomial_2_log_safe_rng(mu[building[n]] + beta * traps[n] + log_sq_foot[n], phi);
+  }
+}
+"
+```
+
+
+
+
+
+```{r}
+N_buildings <- length(unique(pest$building_id))
+N_months    <- length(unique(pest$date))
+
+#
+building_data <- pest %>%
+  mutate(
+    building_fac = factor(building_id, levels = unique(building_id)),
+    building_idx = as.integer(building_fac),
+    ids = rep(1:N_months, N_buildings),
+    month_idx = lubridate::month(date)
+  ) %>% 
+    select(building_idx, 
+           live_in_super, 
+           age_of_building,
+           total_sq_foot, 
+           average_tenant_age, 
+           monthly_average_rent) %>%
+    distinct() %>%
+    arrange(building_idx) %>%
+    select(-building_idx) %>%
+    mutate(
+    across(everything(), scale, scale = FALSE)
+    ) %>% 
+    mutate( # scale by constants
+      age_of_building = age_of_building / 10,
+      total_sq_foot = total_sq_foot / 10000,              # not used
+      average_tenant_age = average_tenant_age / 10,
+      monthly_average_rent = monthly_average_rent / 1000
+    ) %>%
+    as.matrix()
+
+
+stan_data <- pest %>% 
+  select(complaints, traps, building_id, total_sq_foot) %>% 
+  mutate(log_sq_foot  = log(total_sq_foot/1e4)) %>% 
+  mutate(building_id  = as_factor(building_id)) %>% 
+  
+  
+  tidybayes::compose_data(
+  N             = nrow(.), 
+  complaints    = complaints,
+  traps         = traps,
+  log_sq_foot   = log_sq_foot,
+  n_building    = n_distinct(building_id),
+  building      = building_id,
+  building_data = building_data[,-3],
+ )
+
+fitted_model_NB_hier_ncp <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+再看看有效样本
+
+```{r}
+fitted_model_NB_hier_ncp %>% 
+  print(pars = c('sigma_mu','beta','alpha','phi','mu'))
+```
+
+
+haha 有效样本改进很大耶
+```{r}
+scatter_no_divs <- bayesplot::mcmc_scatter(as.array(fitted_model_NB_hier_ncp),
+  pars = c("mu[4]", 'sigma_mu'), transform = list('sigma_mu' = "log"),
+  np = nuts_params(fitted_model_NB_hier_ncp))
+bayesplot::bayesplot_grid(scatter_with_divs, scatter_no_divs,
+               grid_args = list(ncol = 2), ylim = c(-11, 1))
+```
+
+```{r}
+parcoord_no_divs <- bayesplot::mcmc_parcoord(
+  as.array(fitted_model_NB_hier_ncp, pars = c("sigma_mu", "mu")),
+  np = nuts_params(fitted_model_NB_hier_ncp)
+)
+bayesplot::bayesplot_grid(parcoord_with_divs, parcoord_no_divs, ylim = c(-3, 3))
+```
+
+
+```{r sims-full-hier}
+sims_NB_hier_ncp <-
+  rstan::extract(fitted_model_NB_hier_ncp, pars = c('y_rep','inv_phi'))
+```
+
+The marginal plot, again:
+
+```{r ppc-full-hier}
+y_rep <- as.matrix(fitted_model_NB_hier_ncp, pars = "y_rep")
+bayesplot::ppc_dens_overlay(stan_data$complaints, y_rep[1:200,])
+```
+
+Predictions by number of bait stations:
+
+```{r}
+y_rep <- as.matrix(fitted_model_NB_hier_ncp, pars = "y_rep")
+bayesplot::ppc_intervals(y = stan_data$complaints, yrep = y_rep,
+              x = stan_data$traps) +
+  labs(x = "Number of bait stations", y = "Number of complaints")
+```
+
+
+
+
+# Varying intercepts and varying slopes  {-}
+
+
+```{r}
+stan_dat_hier <- readRDS('data/pest_data_longer_stan_dat.RDS')
+stan_dat_hier %>% str()
+```
+
+这个数据比之前的要丰富些，因此，我们需要重新组建一下，弄成
+
+```{r}
+stan_data <- list(
+     N = 360,
+     complaints    = stan_dat_hier$complaints,
+     traps         = stan_dat_hier$traps,
+     log_sq_foot   = stan_dat_hier$log_sq_foot,
+     building_id   = stan_dat_hier$building_idx,
+     n_building    = unique(stan_dat_hier$building_idx),
+     building_data = stan_dat_hier$building_data
+)
+```
+
+
+模型需要扩展下
+
+$$
+\text{complaints}_{b,t} \sim \text{Neg-Binomial}(\lambda_{b,t}, \phi)
+\\
+\lambda_{b,t} = \exp{(\eta_{b,t})}
+\\
+\eta_{b,t} = \mu_b + \kappa_b \, \texttt{traps}_{b,t}
+             + \text{log}\_\textrm{sq}\_\textrm{foot}_b
+\\
+\mu_b \sim \text{normal}(\alpha + \texttt{building}\_\textrm{data} \, \zeta,
+                         \sigma_{\mu}) \\
+\kappa_b \sim \text{normal}(\beta + \texttt{building}\_\textrm{data} \, \gamma,
+                            \sigma_{\kappa})
+$$
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  /*
+  * Alternative to neg_binomial_2_log_rng() that 
+  * avoids potential numerical problems during warmup
+  */
+  int neg_binomial_2_log_safe_rng(real eta, real phi) {
+    real gamma_rate = gamma_rng(phi, phi / exp(eta));
+    if (gamma_rate >= exp(20.79))
+      return -9;      
+    return poisson_rng(gamma_rate);
+  }
+}
+
+data {
+  int<lower=1> N;
+  int<lower=0> complaints[N]; 
+  int traps[N];
+  int<lower=1> n_building;
+  int<lower=1, upper=n_building> building[N];
+  vector[N] log_sq_foot;
+  matrix[n_building,4] building_data;
+}
+
+
+parameters {
+ 
+  real alpha;
+  real beta;               
+  real<lower=0> sigma_mu;  
+  real<lower=0> sigma_kappa;  
+  vector[n_building] mu_raw;
+  vector[n_building] kappa_raw;
+  
+  vector[4] zeta;          
+  vector[4] gamma;   
+  real<lower=0> inv_phi;  
+}
+transformed parameters {
+  real phi = inv(inv_phi);
+  vector[n_building] mu = alpha + building_data * zeta + sigma_mu * mu_raw;
+  vector[n_building] kappa = beta + building_data * gamma + sigma_kappa * kappa_raw;
+}
+
+
+model {
+
+  alpha ~ normal(log(4), 1);
+  beta ~ normal(-0.25, 1);
+  sigma_mu ~ normal(0, 1);
+  sigma_kappa ~ normal(0, 1);
+  mu_raw ~ normal(0,1);
+  kappa_raw ~ normal(0, 1);
+  zeta ~ normal(0, 1);      
+  gamma ~ normal(0, 1);      
+  inv_phi ~ normal(0, 1);
+
+  
+  for (i in 1:N) {
+    target += neg_binomial_2_log_lpmf(complaints[i] | mu[building[i]] + kappa[building[i]] * traps[i] + log_sq_foot[i], phi);
+  }
+  
+
+} 
+generated quantities {
+  int y_rep[N];
+  for (n in 1:N) {
+    y_rep[n] = neg_binomial_2_log_safe_rng(mu[building[n]] + kappa[building[n]] * traps[n] + log_sq_foot[n], phi);
+  }
+}
+"
+```
+
+
+```{r}
+stan_data <- list(
+     N = 360,
+     complaints    = stan_dat_hier$complaints,
+     traps         = stan_dat_hier$traps,
+     log_sq_foot   = stan_dat_hier$log_sq_foot,
+     building      = stan_dat_hier$building_idx,
+     n_building    = length(unique(stan_dat_hier$building_idx)),
+     building_data = stan_dat_hier$building_data
+)
+
+fitted_model_NB_hier_slopes <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+bayesplot::mcmc_hist(as.matrix(fitted_model_NB_hier_slopes, pars = "sigma_kappa"),
+          binwidth = 0.005
+)
+```
+
+```{r}
+print(fitted_model_NB_hier_slopes,
+      pars = c('kappa','beta','alpha','phi','sigma_mu','sigma_kappa','mu'))
+```
+
+```{r}
+bayesplot::mcmc_hist(as.matrix(fitted_model_NB_hier_slopes, pars = "beta"),
+          binwidth = 0.005
+)
+```
+
+
+```{r ppc-full-hier-slopes}
+y_rep <- as.matrix(fitted_model_NB_hier_slopes, pars = "y_rep")
+bayesplot::ppc_dens_overlay(y = stan_dat_hier$complaints, yrep = y_rep[1:200,]
+)
+```

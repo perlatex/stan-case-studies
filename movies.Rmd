@@ -1,0 +1,166 @@
+# 人们会给爱情片打高分？ {#movies}
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+library(broom.mixed)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+```
+
+
+
+```{r}
+movies_clean <- ggplot2movies::movies %>% 
+  select(title, year, rating, Action, Romance) %>%
+  filter(!(Action == 1 & Romance == 1)) %>% # 既是爱情片又是动作片的，删去
+  mutate(genre = case_when(
+    Action == 1 ~ "Action",
+    Romance == 1 ~ "Romance",
+    TRUE ~ "Neither"
+  )) %>%
+  filter(genre != "Neither") %>%
+  mutate(genre = factor(genre)) %>% 
+  mutate(genre_numeric = as.numeric(genre)) %>% # action = 1, comedy = 2
+  select(-Action, -Romance) %>%
+  group_by(genre) %>%
+  slice_sample(n = 200) %>%  # 每种题材的电影**随机**选取若干，每次运行结果会不同
+  ungroup()
+
+movies_clean
+```
+
+
+```{r}
+movies_clean %>%
+  ggplot(aes(x = genre, y = rating, color = genre)) +
+  geom_boxplot() +
+  geom_jitter() +
+  scale_x_discrete(
+    expand = expansion(mult = c(0.5, 0.5))
+  ) +
+  theme(legend.position = "none") 
+```
+
+
+
+
+
+```{r}
+group_diffs <- movies_clean %>% 
+  group_by(genre) %>% 
+  summarize(avg_rating = mean(rating, na.rm = TRUE)) %>% 
+  mutate(diff_means = avg_rating - lag(avg_rating))
+group_diffs
+
+```
+
+
+
+
+
+## normal
+
+先假定rating评分，服从正态分布，同时不同的电影题材 genre，分组考虑
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;                            // Sample size
+  int<lower=2> n_groups;                     // Number of groups
+  vector[N] y;                               // Outcome variable
+  int<lower=1, upper=n_groups> group_id[N];  // Group variable
+}
+transformed data {
+  real mean_y;
+  mean_y = mean(y); 
+}
+parameters {
+  vector[2] mu;                    // Estimated group means for each
+  vector<lower=0>[2] sigma;        // Estimated group sd for each
+}
+model {
+  mu ~ normal(mean_y, 2);
+  sigma ~ cauchy(0, 1);
+
+  for (n in 1:N){
+    y[n] ~ normal(mu[group_id[n]], sigma[group_id[n]]);
+  }
+}
+
+generated quantities {
+  real mu_diff;
+  real cohen_d;
+  real cles;
+
+  mu_diff = mu[2] - mu[1];
+  cohen_d = mu_diff / sqrt(sum(sigma)/2);
+  cles = normal_cdf(mu_diff / sqrt(sum(sigma)), 0, 1);
+}
+
+'
+
+stan_data <- movies_clean %>% 
+  select(genre, rating, genre_numeric) %>% 
+  tidybayes::compose_data(
+  N        = nrow(.), 
+  n_groups = n_distinct(genre), 
+  group_id = genre_numeric, 
+  y        = rating
+  )
+
+stan_best_normal <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+
+```{r, fig.width= 5, fig.height= 5}
+stan_best_normal %>% 
+  tidybayes::spread_draws(mu_diff) %>%
+  ggplot(aes(x = mu_diff)) +
+  tidybayes::geom_halfeyeh() +
+  geom_vline(xintercept = 0)
+```
+
+
+
+
+
+```{r, fig.width= 5, fig.height= 2.5}
+stan_best_normal %>% 
+  tidybayes::spread_draws(mu_diff) %>%
+  
+	ggplot(aes(x = mu_diff)) +
+  stat_eye(side = "right", 
+           fill = "skyblue",
+  		     point_interval = mode_hdi, 
+  		     .width = c(0.95, 0.5),
+    	     interval_colour = "red", 
+    	     point_colour = "red",
+  		     width = 15.5, 
+  		     height = 0.1
+  		     ) +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 1) +
+
+  coord_cartesian(xlim = c(-1, 2)) +
+	labs(x = "mu_diff", y = NULL)
+```
+
+
+
+
+
+
+## 参考
+
+- John Kruschke’s Bayesian Estimation Supersedes the t Test (BEST) method
+
+- <https://github.com/andrewheiss/diff-means-half-dozen-ways/blob/master/imdb_best.stan>
+
+- <https://github.com/m-clark/Miscellaneous-R-Code/blob/master/ModelFitting/Bayesian/rstant_testBEST.R>

@@ -1,0 +1,210 @@
+# 流行病模型 {#sir}
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(loo)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+```
+
+
+
+
+```{r}
+influenza_england_1978_school <- 
+  read_rds("influenza_england_1978_school.rds")
+influenza_england_1978_school
+```
+
+
+
+```{r}
+influenza_england_1978_school %>%
+  mutate(date = lubridate::as_date(date)) %>%
+  ggplot() + 
+  geom_point(aes(x = date, y = in_bed)) + 
+  scale_x_date(date_breaks = "1 day", date_labels = "%m-%d") +
+  labs(y = "Number of students in bed")
+```
+
+
+```{r}
+# time series of cases
+cases <- influenza_england_1978_school$in_bed  # Number of students in bed
+
+# total count
+N <- 763;
+
+# times
+n_days <- length(cases) 
+t <- seq(0, n_days, by = 1)
+t0  <- 0 
+t <- t[-1]
+
+#initial conditions
+i0 <- 1
+s0 <- N - i0
+r0 <- 0
+y0 <- c(S = s0, I = i0, R = r0)
+
+# data for Stan
+data_sir <- list(
+  n_days = n_days, 
+  y0     = y0, 
+  t0     = t0, 
+  ts     = t, 
+  N      = N, 
+  cases  = cases
+  )
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+functions {
+  real[] sir(real t, real[] y, real[] theta, 
+             real[] x_r, int[] x_i) {
+
+      real S = y[1];
+      real I = y[2];
+      real R = y[3];
+      real N = x_i[1];
+      
+      real beta = theta[1];
+      real gamma = theta[2];
+      
+      real dS_dt = -beta * I * S / N;
+      real dI_dt =  beta * I * S / N - gamma * I;
+      real dR_dt =  gamma * I;
+      
+      return {dS_dt, dI_dt, dR_dt};
+  }
+}
+data {
+  int<lower=1> n_days;
+  real y0[3];
+  real t0;
+  real ts[n_days];
+  int N;
+  int cases[n_days];
+}
+transformed data {
+  real x_r[0];
+  int x_i[1] = { N };
+}
+parameters {
+  real<lower=0> gamma;
+  real<lower=0> beta;
+  real<lower=0> phi_inv;
+}
+transformed parameters{
+  real y[n_days, 3];        // vector[n_days] y[3];
+  real phi = 1. / phi_inv;
+  {
+    real theta[2];
+    theta[1] = beta;
+    theta[2] = gamma;
+
+    y = integrate_ode_rk45(sir, y0, t0, ts, theta, x_r, x_i); 
+                                  // purrr::map() 一样？
+                                  // sir_ode return {dS_dt, dI_dt, dR_dt};
+                                  // integrate_ode_ return {S, I, R} to y;
+  }
+}
+model {
+  //priors
+  beta ~ normal(2, 1);
+  gamma ~ normal(0.4, 0.5);
+  phi_inv ~ exponential(5);
+  
+  //sampling distribution
+  //col(matrix x, int n) - The n-th column of matrix x. Here the number of infected people 
+  cases ~ neg_binomial_2(col(to_matrix(y), 2), phi);
+}
+generated quantities {
+  real R0 = beta / gamma;
+  real recovery_time = 1 / gamma;
+  real pred_cases[n_days];
+  pred_cases = neg_binomial_2_rng(col(to_matrix(y), 2), phi);
+}
+
+"
+
+data_sir <- list(
+  n_days = n_days, 
+  y0     = y0, 
+  t0     = t0, 
+  ts     = t, 
+  N      = N, 
+  cases  = cases
+  )
+
+
+fit_sir_negbin <- stan(model_code = stan_program, data = data_sir )
+```
+
+
+```{r}
+pars = c('beta', 'gamma', "R0", "recovery_time")
+print(fit_sir_negbin, pars = pars)
+```
+
+```{r}
+stan_dens(fit_sir_negbin, pars = pars, separate_chains = TRUE)
+```
+
+```{r}
+fit_sir_negbin %>%
+  tidybayes::spread_draws(pred_cases[i]) %>%
+  tidybayes::mean_qi(pred_cases, .width = c(.89)) %>%
+  dplyr::bind_cols(influenza_england_1978_school) %>%
+  
+  mutate(date = lubridate::as_date(date)) %>%
+  ggplot(aes(x = date, y = pred_cases)) + 
+   geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.6,
+    fill = "orange"
+  ) +
+  geom_point(aes(y = in_bed)) + 
+  scale_x_date(date_breaks = "1 day", date_labels = "%m-%d") +
+  labs(y = "Number of students in bed")
+```
+
+```{r}
+ fit_sir_negbin %>%
+  tidybayes::spread_draws(y[i,v]) %>%
+  ungroup() %>%
+  filter(v == 2) %>%
+  group_by(i) %>%
+  tidybayes::mean_qi(y, .width = c(.89)) %>%
+  dplyr::bind_cols(influenza_england_1978_school) %>%
+  
+  mutate(date = lubridate::as_date(date)) %>%
+  ggplot(aes(x = date, y = y)) + 
+   geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.6,
+    fill = "orange"
+  ) +
+  geom_line(aes(y = y)) + 
+  scale_x_date(date_breaks = "1 day", date_labels = "%m-%d") +
+  labs(x = "Day", y = "Number of infected students")
+
+```
+
+
+```{r}
+fit_sir_negbin %>%
+  tidybayes::spread_draws(y[i,2]) %>%
+  ungroup() %>%
+  slice(n=1) %>%
+  unnest(y)
+```
+
+
+
+
