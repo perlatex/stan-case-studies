@@ -1,0 +1,677 @@
+# 电影评分倾向 {#irt}
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+```{r}
+df1 <- tibble(
+  movie = 1,
+  y = c(3, 5)
+)
+df2 <- tibble(
+  movie = 2,
+  y = rep(c(2, 3, 4, 5), c(10, 20, 30, 40))
+)
+
+movie_data <- bind_rows(df1, df2)
+movie_data
+```
+
+
+
+
+
+```{r eda-movie-rating-2, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;            
+  vector[N] y;               
+  int movie[N];  
+  int<lower=1> K;
+}
+parameters {
+  vector[K] mu; 
+  real sigma;
+}
+
+model {
+  sigma ~ normal(3, 1);
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[movie[i]], sigma);
+  }
+ 
+}
+
+'
+
+stan_data <- movie_data %>%
+  tidybayes::compose_data(
+    N          = nrow(.),
+    K          = n_distinct(movie),
+    movie      = movie,
+    y          = y
+  )
+
+fit_normal <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r eda-movie-rating-3}
+fit_normal
+```
+
+
+## Extending the model to J movies
+
+
+
+```{r eda-movie-rating-4}
+movie_data <-
+  tibble(
+    movie = 1:10,                                 # N = 10个电影
+    theta = rnorm(10, 3.0, 0.5),                  # 模拟的每个电影评分均值
+    N_ratings = sample(1:100, 10, replace = TRUE) # 每个电影的投票次数
+  ) %>%
+  mutate(
+    y = map2(N_ratings, theta, rnorm, sd = 2.0)
+  ) %>% 
+  unnest(cols = c(y))
+
+movie_data
+```
+
+
+
+
+```{r eda-movie-rating-5, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;            
+  vector[N] y;               
+  int<lower=1> K;
+  int<lower=1, upper=K> movie[N];  
+}
+parameters {
+  vector[K] mu; 
+  real sigma;
+}
+
+model {
+  sigma ~ normal(3, 1);
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | mu[movie[i]], sigma);
+  }
+ 
+}
+
+'
+
+stan_data <- movie_data %>%
+  tidybayes::compose_data(
+    N          = nrow(.),
+    K          = n_distinct(movie),
+    movie      = movie,
+    y          = y
+  )
+
+fit_normal2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r eda-movie-rating-6}
+d_actual <- movie_data %>% 
+  distinct(movie, theta, N_ratings)
+d_actual 
+```
+
+
+```{r eda-movie-rating-7}
+t <- fit_normal2 %>% 
+  tidybayes::spread_draws(mu[i]) %>% 
+  group_by(i) %>% 
+  ggdist::mean_qi(.width = c(0.5, 0.95)) %>% 
+  rename(movie = i) %>% 
+  left_join(d_actual, by = "movie") 
+t
+```
+
+
+```{r eda-movie-rating-8}
+t %>% 
+  ggplot(aes(x = mu, y = theta)) +
+  geom_point() +
+  ggdist::geom_pointinterval(aes(xmin = .lower, xmax = .upper)) +
+  geom_abline() +
+  scale_x_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) +
+  scale_y_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) 
+```
+
+
+电影评分的人越多，我们估计它的分布精确度越高，我这里画出50%可信赖区间与样本大小的函数，样本越多，区间宽度越小，越集中
+
+
+
+```{r eda-movie-rating-9}
+t %>% 
+  filter(.width == 0.5) %>% 
+  mutate(intervals = .upper - .lower) %>% 
+  
+  ggplot(aes(x = N_ratings, intervals)) +
+  geom_point() +
+  ggtitle("when you have more data, you have less uncertainly.")
+  
+```
+
+
+
+
+## item response model with parameters for rates and for movies
+
+```{r eda-movie-rating-10}
+J       <- 40  # 有多少电影
+K       <- 100 # 有多少人打分，每部电影每个人都要打分
+
+movie_quality       <- rnorm(J, 0, 1)
+rater_difficulty    <- rnorm(K, 0, 1)
+
+
+movie_data3 <- 
+  crossing(rater = 1:100, movie = 1:40) %>% 
+  mutate(
+    y = map2_dbl(rater, movie, 
+                 ~rnorm(1, 3 + 0.5*movie_quality[.y] - 0.5*rater_difficulty[.x]),
+                 sd = 2)
+  )
+movie_data3
+```
+
+
+
+
+```{r eda-movie-rating-11}
+d_rater <- tibble(
+  rater = 1:100, # 有多少人打分，每部电影每个人都要打分
+  rater_difficulty = rnorm(100, 0, 1)
+)
+
+d_movie <- tibble(
+  movie = 1:40, # 有多少电影
+  movie_quality = rnorm(40, 0, 1)
+)
+
+# set mu = 3, sigma_a = sigma_b = 0.5, sigma = 2
+movie_data30 <- 
+  crossing(d_rater, d_movie) %>% 
+  mutate(
+    y = map2_dbl(movie_quality, rater_difficulty, 
+                 ~rnorm(n = 1, mean = 3 + 0.5*.x - 0.5*.y, sd = 2)
+                 )
+  )
+
+movie_data30
+```
+
+
+
+
+```{r eda-movie-rating-12, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;            
+  vector[N] y;               
+  int<lower=1> J;
+  int<lower=1, upper=J> movie[N]; 
+  int<lower=1> K;
+  int<lower=1, upper=K> rater[N]; 
+}
+parameters {
+  vector[J] alpha; 
+  vector[K] beta; 
+  real mu;
+  real<lower=0> sigma;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_b;
+}
+transformed parameters{
+  vector[N] MU;
+  for(i in 1:N) {
+    MU[i] = mu + sigma_a * alpha[movie[i]] - sigma_b * beta[rater[i]];
+  }
+}
+model {
+  sigma ~ normal(3, 1);
+  alpha ~ normal(0, 1);
+   beta ~ normal(0, 1);
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | MU[i], sigma);
+  }
+ 
+}
+
+'
+
+stan_data <- movie_data30 %>%
+  tidybayes::compose_data(
+    N              = nrow(.),
+    movie          = movie,
+    rater          = rater,
+    y              = y,
+    J              = n_distinct(movie),
+    K              = n_distinct(rater)
+  )
+
+fit_normal3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+
+```{r eda-movie-rating-13}
+fit_normal3 %>% 
+  tidybayes::spread_draws(alpha[i]) %>% 
+  group_by(i) %>% 
+  ggdist::mean_qi() %>% 
+  
+  ggplot(aes(x = alpha)) +
+  geom_density()
+```
+
+```{r eda-movie-rating-14}
+fit_normal3 %>% 
+  tidybayes::spread_draws(beta[i]) %>% 
+  group_by(i) %>% 
+  ggdist::mean_qi() %>% 
+  
+  ggplot(aes(x = beta)) +
+  geom_density()
+```
+
+
+
+```{r eda-movie-rating-15}
+fit_normal3 %>% 
+  tidybayes::gather_draws(mu, sigma, sigma_a, sigma_b) %>% 
+  ggdist::mean_qi() 
+```
+
+
+可以看到，模型反演的结果，和真实结果符合的很好
+mu = 3, sigma_a = sigma_b = 0.5, sigma = 2
+
+
+
+```{r eda-movie-rating-16}
+d_actual <- 
+  tibble(
+    i = 1:40,
+    alpha_actual = movie_quality
+  )
+
+
+fit_normal3 %>% 
+  tidybayes::spread_draws(alpha[i]) %>% 
+  group_by(i) %>% 
+  ggdist::median_qi(.width = c(0.5, 0.95)) %>% 
+  left_join(d_actual, by = "i") %>% 
+
+  ggplot(aes(x = alpha, y = alpha_actual)) +
+  geom_point(color = "red", size = 4) +
+  ggdist::geom_pointinterval(aes(xmin = .lower, xmax = .upper)) +
+  geom_abline() +
+  scale_x_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) +
+  scale_y_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) 
+```
+
+
+```{r eda-movie-rating-17}
+d_actual <- 
+  tibble(
+    i = 1:100,
+    beta_actual = rater_difficulty
+  )
+
+
+fit_normal3 %>% 
+  tidybayes::spread_draws(beta[i]) %>% 
+  group_by(i) %>% 
+  ggdist::median_qi(.width = c(0.5, 0.95)) %>% 
+  left_join(d_actual, by = "i") %>%
+
+  ggplot(aes(x = beta, y = beta_actual)) +
+  geom_point(color = "red", size = 4) +
+  ggdist::geom_pointinterval(aes(xmin = .lower, xmax = .upper)) +
+  geom_abline() +
+  scale_x_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) +
+  scale_y_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) 
+```
+
+## more challenge
+
+```{r eda-movie-rating-18}
+d_rater <- tibble(
+  rater = 1:100, # 有多少人打分，每部电影每个人都要打分
+  rater_difficulty = rnorm(100, 0, 1)
+)
+
+d_movie <- tibble(
+  movie = 1:40, # 有多少电影
+  movie_quality = rnorm(40, 0, 1)
+)
+
+movie_data4 <- 
+  crossing(d_rater, d_movie) %>% 
+  mutate(
+    y = map2_dbl(rater, movie, 
+                 ~rnorm(1, 3 + 0.5*movie_quality - 0.5*rater_difficulty),
+                 sd = 2)
+  )
+
+movie_data4
+```
+
+
+
+
+
+
+
+
+
+
+```{r eda-movie-rating-19, eval=FALSE}
+# 我理解错误了
+movie_data4 %>%
+  mutate(
+    movie_type = if_else(rater_difficulty > 0,
+      sample(c("crime_movie", "romantic_movie"), size = 1, prob = c(0.6, 0.3)),
+      sample(c("crime_movie", "romantic_movie"), size = 1, prob = c(0.3, 0.6))
+    )
+  )
+```
+
+
+
+
+正确理解如下，需要补个示意图
+
+```{r eda-movie-rating-20}
+d_rater <- tibble(
+  rater = 1:100, # 有多少人打分，每部电影每个人都要打分
+  rater_difficulty = rnorm(100, 0, 1)
+)
+
+d_movie <- tibble(
+  movie = 1:40, # 有多少电影
+  genre = rep(c("romantic", "crime"), c(20, 20)),
+  movie_quality = rnorm(40, 0, 1)
+)
+
+# set mu = 3, sigma_a = sigma_b = 0.5, sigma = 2
+movie_data4 <- 
+  crossing(d_rater, d_movie) %>% 
+  mutate(
+    y = map2_dbl(movie_quality, rater_difficulty, 
+                 ~rnorm(n = 1, mean = 3 + 0.5*.x - 0.5*.y, sd = 2)
+    )
+  )
+ 
+movie_data4
+```
+
+
+
+
+相当于做了一个子集选取
+- rater_difficulty > 0  genre == "romantic"  0.6 
+- rater_difficulty > 0  genre == "crime"     0.3 
+- rater_difficulty < 0  genre == "romantic"  0.3 
+- rater_difficulty < 0  genre == "crime"     0.6 
+
+```{r eda-movie-rating-21}
+movie_data400 <- movie_data4 %>%
+  mutate(
+      prob_of_rated = ifelse(rater_difficulty > 0,
+                        ifelse(genre == "romantic", 0.6, 0.3),
+                        ifelse(genre == "romantic", 0.3, 0.6)
+                        )
+    ) %>% 
+   mutate(
+     rated = map_int(prob_of_rated , ~rbinom(1, 1, .x))
+   ) %>% 
+  filter(rated == 1)
+
+
+movie_data400
+```
+
+文章中这个子集是一个非平衡数据，我们看看什么地方不平衡
+```{r eda-movie-rating-22}
+movie_data400 %>% count(rater, genre)
+```
+
+
+
+
+```{r eda-movie-rating-23}
+movie_data4 %>% count(genre)
+movie_data4 %>% count(rater, genre)
+movie_data4 %>% count(rater_difficulty > 0, genre)
+```
+
+```{r eda-movie-rating-24}
+movie_data400 %>% count(genre)
+movie_data400 %>% count(rater, genre)
+movie_data400 %>% count(rater_difficulty > 0, genre)
+```
+更多 `rater_difficulty > 0` 代表**挑剔严格的评分人**，
+
+- rater_difficulty > 0  genre == "romantic"  0.6 
+- rater_difficulty > 0  genre == "crime"     0.3 
+- rater_difficulty < 0  genre == "romantic"  0.3 
+- rater_difficulty < 0  genre == "crime"     0.6 
+
+
+
+
+```{r eda-movie-rating-25, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;            
+  vector[N] y;               
+  int<lower=1> J;
+  int<lower=1, upper=J> movie[N]; 
+  int<lower=1> K;
+  int<lower=1, upper=K> rater[N]; 
+}
+parameters {
+  vector[J] alpha; 
+  vector[K] beta; 
+  real mu;
+  real<lower=0> sigma;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_b;
+}
+transformed parameters{
+  vector[N] MU;
+  for(i in 1:N) {
+    MU[i] = mu + sigma_a * alpha[movie[i]] - sigma_b * beta[rater[i]];
+  }
+}
+model {
+  sigma ~ normal(3, 1);
+  alpha ~ normal(0, 1);
+   beta ~ normal(0, 1);
+  for(i in 1:N) {
+    target += normal_lpdf(y[i] | MU[i], sigma);
+  }
+ 
+}
+
+'
+
+stan_data <- movie_data400 %>%
+  dplyr::select(rater, movie, y) %>% 
+  tidybayes::compose_data(
+    N              = nrow(.),
+    movie          = movie,
+    rater          = rater,
+    y              = y,
+    J              = n_distinct(movie),
+    K              = n_distinct(rater)
+  )
+
+fit_normal4 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r eda-movie-rating-26}
+fit_normal4 %>% 
+  tidybayes::gather_draws(mu, sigma, sigma_a, sigma_b) %>% 
+  ggdist::mean_qi() 
+```
+符合的还好
+我们设定的是，mu = 3, sigma_a = sigma_b = 0.5, sigma = 2
+
+
+
+
+```{r eda-movie-rating-27}
+d_actual <- movie_data400 %>% 
+  distinct(
+    movie, movie_quality
+  ) %>% 
+  rename(i = movie)
+d_actual
+```
+
+
+```{r eda-movie-rating-28}
+fit_normal4 %>% 
+  tidybayes::spread_draws(alpha[i]) %>% 
+  group_by(i) %>% 
+  ggdist::median_qi(.width = c(0.5, 0.95)) %>% 
+  left_join(d_actual, by = "i") %>%
+
+  ggplot(aes(x = alpha, y = movie_quality)) +
+  geom_point(color = "red", size = 4) +
+  ggdist::geom_pointinterval(aes(xmin = .lower, xmax = .upper)) +
+  geom_abline() +
+  scale_x_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) +
+  scale_y_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3)
+```
+
+
+```{r eda-movie-rating-29}
+d_actual <- movie_data400 %>% 
+  distinct(
+    rater, rater_difficulty
+  ) %>% 
+  rename(i = rater)
+
+
+fit_normal4 %>% 
+  tidybayes::spread_draws(beta[i]) %>% 
+  group_by(i) %>% 
+  ggdist::median_qi(.width = c(0.5, 0.95)) %>% 
+  left_join(d_actual, by = "i") %>%
+
+  ggplot(aes(x = beta, y = rater_difficulty)) +
+  geom_point(color = "red", size = 4) +
+  ggdist::geom_pointinterval(aes(xmin = .lower, xmax = .upper)) +
+  geom_abline() +
+  scale_x_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) +
+  scale_y_continuous(limits = c(-3,3), breaks = -3:3, labels = -3:3) 
+```
+
+
+- 原始设定的评分
+
+```{r eda-movie-rating-30}
+df_raw <- movie_data400 %>% 
+  distinct(
+    movie, movie_quality
+  ) %>% 
+  arrange(movie) %>% 
+  mutate( mu_raw = 3 + 0.5 * movie_quality) %>% 
+  select(movie, mu_raw)
+df_raw
+```
+
+
+
+
+- 根据设定的评分作为均值，生成的随机评分（数量为评分的人数），然后做平均
+
+```{r eda-movie-rating-31}
+df_average <- movie_data400 %>% 
+  group_by(movie) %>% 
+  summarise(
+    mean_rating =  mean(y)
+  ) %>% 
+  select(movie, mu_average = mean_rating)
+df_average
+```
+
+
+- 模型给出的结果
+
+```{r eda-movie-rating-32}
+df_model <- fit_normal4 %>% 
+  tidybayes::spread_draws(mu, alpha[i]) %>% 
+  group_by(i) %>% 
+  ggdist::median_qi() %>% 
+  select(i, mu, alpha) %>% 
+  mutate(mu = mu + 0.5 * alpha) %>% 
+  select(movie = i, mu_model = mu)
+
+df_model
+```
+
+
+
+```{r eda-movie-rating-33}
+p1 <- df_raw %>% 
+  left_join(df_average) %>% 
+  left_join(df_model) %>% 
+  
+  ggplot(aes(x = mu_average, y = mu_raw)) +
+  geom_point() +
+  geom_abline() +
+  scale_x_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) +
+  scale_y_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) 
+  
+
+p2 <- df_raw %>% 
+  left_join(df_average) %>% 
+  left_join(df_model) %>% 
+  
+  ggplot(aes(x = mu_model, y = mu_raw)) +
+  geom_point() +
+  geom_abline() +
+  scale_x_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) +
+  scale_y_continuous(limits = c(1,5), breaks = 1:5, labels = 1:5) 
+  
+
+library(patchwork) 
+p1+p2
+```
+
+
+<details><summary>Session Info</summary>
+```{r eda-movie-rating-34, echo=FALSE}
+sessioninfo::session_info()
+```
+</details>

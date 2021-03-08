@@ -1,0 +1,218 @@
+# 世界杯 {#worldcup}
+
+
+```{r libraries, echo = FALSE}
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+```
+
+
+
+```{r eda-worldcup-1}
+team_info <- read.table("./rawdata/soccerpowerindex.txt", header = FALSE) %>% 
+  as_tibble() %>% 
+  rename(team_name = V1) %>% 
+  mutate(
+    team_id = 1:n(),
+    prior_score = n():1
+    ) %>% 
+  mutate(
+    across(prior_score, ~ (. - mean(.)) / (2 * sd(.)) )
+)
+
+team_info
+```
+
+
+
+```{r eda-worldcup-2}
+vector_key <- team_info %>% 
+  select(team_name, team_id) %>% 
+  tibble::deframe()
+
+
+
+game_info <- 
+  read.table("data/worldcup2014.txt", header = FALSE) %>% 
+  as.tibble() %>% 
+  mutate(game_id = row_number()) %>% 
+  select(game_id, team_1 = V1, score_1 = V2, team_2 = V3, score_2 = V4) %>% 
+  mutate(
+    across(c(team_1, team_2), 
+           ~dplyr::recode(., !!!vector_key, .default = NA_integer_)
+           )
+  )
+game_info
+```
+prior_score刻画球队能力，两个队的能力差，服从正态分布
+
+```{r eda-worldcup-3, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N_teams;            
+  int<lower=1> N_games;            
+  int team_1[N_games];               
+  int team_2[N_games];               
+  vector[N_games] score_1;               
+  vector[N_games] score_2;               
+  vector[N_teams] prior_score;  
+  real df;
+}
+transformed data {
+  vector[N_games] dif;
+  vector[N_games] sqrt_dif;
+  for (j in 1:N_games) {
+   dif[j] = score_1[j] - score_2[j];
+   sqrt_dif[j] = (step(dif[j]) - 0.5) * sqrt(fabs(dif[j]));
+  }
+}
+parameters {
+  vector[N_teams] alpha;
+  real b;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_y;
+}
+transformed parameters {
+  vector[N_teams] a;
+  for (i in 1:N_teams) {
+    a[i] = b * prior_score[i] + sigma_a * alpha[i];
+  }
+}
+model {
+   for (j in 1:N_games) {
+      target += student_t_lpdf(sqrt_dif[j]|df, a[team_1[j]] - a[team_2[j]], sigma_y);
+   }
+}
+
+'
+
+
+
+stan_data <- list(
+    N_teams          = nrow(team_info),
+    N_games          = nrow(game_info),
+      team_1         = game_info$team_1,
+      team_2         = game_info$team_2,
+      score_1        = game_info$score_1,
+      score_2        = game_info$score_2,
+      prior_score    = team_info$prior_score,
+      df             = 7
+  )
+
+
+fit <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r eda-worldcup-4}
+fit %>% 
+  tidybayes::spread_draws(a[i]) %>% 
+  mean_qi() %>% 
+  ggplot(aes(y = i, x = a, xmin = .lower, xmax = .upper)) +
+  geom_pointinterval() +
+  scale_y_reverse()
+```
+
+
+
+## adv
+
+这里我们认为能力差，不需要开方，直接使用差值dif
+
+```{r eda-worldcup-5, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N_teams;            
+  int<lower=1> N_games;            
+  int team_1[N_games];               
+  int team_2[N_games];               
+  vector[N_games] score_1;               
+  vector[N_games] score_2;               
+  vector[N_teams] prior_score;  
+  real df;
+}
+transformed data {
+  vector[N_games] dif;
+  for (j in 1:N_games) {
+   dif[j] = score_1[j] - score_2[j];
+  }
+}
+parameters {
+  vector[N_teams] alpha;
+  real b;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_y;
+}
+transformed parameters {
+  vector[N_teams] a;
+  for (i in 1:N_teams) {
+    a[i] = b * prior_score[i] + sigma_a * alpha[i];
+  }
+}
+model {
+   for (j in 1:N_games) {
+      target += student_t_lpdf(dif[j]|df, a[team_1[j]] - a[team_2[j]], sigma_y);
+   }
+}
+generated quantities {
+ vector[N_games] y_rep;
+ for (j in 1:N_games) {
+  y_rep[j] = student_t_rng(df, a[team_1[j]] - a[team_2[j]], sigma_y);
+ }
+}
+'
+
+
+
+stan_data <- list(
+    N_teams        = nrow(team_info),
+    N_games        = nrow(game_info),
+    team_1         = game_info$team_1,
+    team_2         = game_info$team_2,
+    score_1        = game_info$score_1,
+    score_2        = game_info$score_2,
+    prior_score    = team_info$prior_score,
+    df             = 7
+  )
+
+
+fit2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r eda-worldcup-6}
+fit2 %>% 
+  tidybayes::spread_draws(a[i]) %>% 
+  mean_qi() %>% 
+  ggplot(aes(y = i, x = a, xmin = .lower, xmax = .upper)) +
+  geom_pointinterval() +
+  scale_y_reverse(
+    breaks = 1:32,
+    labels = 1:32
+  )
+```
+
+红点为真实结果，黑点和黑线是预测
+```{r}
+fit2 %>% 
+  tidybayes::spread_draws(y_rep[i]) %>% 
+  mean_qi() %>% 
+  mutate(i = as.factor(i)) %>% 
+  ggplot() +
+  geom_pointinterval(
+    aes(y = fct_reorder(i, y_rep), x = y_rep, xmin = .lower, xmax = .upper)
+    ) +
+  geom_point(data= game_info,
+             aes(x = score_1 - score_2, y = as_factor(game_id)),
+             color = "red", size = 3
+             )
+```
+
+<details><summary>Session Info</summary>
+```{r eda-worldcup-7, echo=FALSE}
+sessioninfo::session_info()
+```
+</details>
+

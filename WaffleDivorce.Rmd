@@ -1,0 +1,1194 @@
+# 吃华夫饼会导致离婚？{#waffle}
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(brms)
+library(tidybayes)
+library(rstan)
+library(patchwork)
+```
+
+
+
+`WaffleHouses` 是一种卖华夫饼的连锁店，类似肯德基。华夫饼店24小时营业，店里一般都备有发电机，因此即使在飓风之后也会营业。所以，人们把华夫饼屋视为灾难严重性的一种指示，如果它都关门了，那说明真的很严重灾难了。
+
+我们今天研究的不是饼屋开不开门的问题，而是它与离婚率的关系。 因为人们发现，离婚率高的地方，人均华夫饼店的数量就越高，相反，离婚率低的地方，没有华夫饼店。 （这是什么饼，吃了会导致婚姻危机？）
+
+```{r}
+d <- readr::read_csv(here::here("data", "WaffleDivorce.csv"))
+```
+
+首先对 `MedianAgeMarriage, Marriage, Divorce` 三列标准化
+
+```{r}
+d <- d %>%
+  mutate(
+    across(c(MedianAgeMarriage, Marriage, Divorce), ~ (.x - mean(.x)) / sd(.x))
+  )
+glimpse(d)
+```
+
+人均饼屋数量（华夫饼屋与人口数量的比例）与当地离婚率的关联。通过图，我们看不出他们之间的关联
+
+```{r, fig.width = 3, fig.height = 3, message = F}
+# install.packages("ggrepel", depencencies = T)
+library(ggrepel)
+
+d %>% 
+  ggplot(aes(x = WaffleHouses / Population, y = Divorce)) +
+  geom_point() +
+  geom_text_repel(data = d %>% filter(Loc %in% c("ME", "OK", "AR", "AL", "GA", "SC", "NJ")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 1024) +
+  geom_smooth(method = "lm", level = 0.89, fullrange = T) +
+  scale_x_continuous(limits = c(0, 50)) +
+  labs(x = "Waffle Houses per million", y = "Divorce Rate") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+```
+
+常理下不太可能吃饼会导致婚姻危机。显然，这是一种虚假的关联。但是我们可能会想，是哪个（哪些）变量导致了虚假关联？ 事实上，华夫饼屋1955年在南美地区兴起发展的，而离婚任何地方都有发生，只是南美地区离婚率较高，很可能是某个原因让这两件事情同时发生了。
+
+饼屋和离婚率，这称之为关联事件，但彼此不构成因果关系。**关联不等于因果**。
+
+一般情况下，会做多元回归模型，原因如下：
+
+-   减少混淆，这里饼屋与离婚率就是一种混淆，它会隐藏真正重要的原因
+-   可能是多个或者复杂的原因。一个现象可能是多个原因同时引起，所以需要把多个因素放在一起同时测量
+-   交互作用。一个变量要依赖另一个变量起作用，比如植物生成需要光和水，只有光不行，只有水也不行。
+
+下面通过最简单的线性回归模型揭示： - 饼屋与离婚率之间的虚假关联 - 被隐藏的关联
+
+
+
+## 结婚率和离婚率
+
+先把饼屋的事情放一边，我们先看看结婚率和离婚率之间的关联。
+
+### stan code
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;            // number of observations
+  int<lower=1> K;            // number of regressors (including constant)
+  vector[n] Divorce;         // outcome
+  matrix[n, K] X;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;    // scale
+  vector[K] b;                     // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                    // location
+  mu = X * b;
+}
+model {
+  Divorce ~ normal(mu, sigma);    // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 2,
+    y = Divorce,
+    X = model.matrix(~Marriage, .)
+  )
+
+m5.1 <- stan(model_code = stan_program, data = stan_data)
+```
+
+模型结果，显示系数为`b[2]`为 0.35
+
+```{r}
+m5.1 %>% summary()
+
+m5.1 %>%
+  rstan::extract(pars = c('b[1]', 'b[2]'))
+
+m5.1 %>%
+  rstan::extract(pars = c('b', 'mu'))
+```
+
+`rstan::extract()` 可以提取后验样本，但不是很好用，尤其是可视化的时候。我推荐`tidybayes::spread_draws`，如果是`brms`模型，可以使用更方便的`tidybayes::add_fitted_draws()` 或者`tidybayes::add_predicted_draws()`
+
+-   提取系数
+
+```{r}
+key <- c("1" = "intercept", "2" = "bM")
+m5.1 %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  mutate(i = recode(i, !!!key))
+```
+
+-   提取`mu`和`yhat`
+
+可以将讲`mu[i]` 和 `yhat[i]` 理解为 `fitted` 和 `predicted`
+
+```{r}
+post_draw <- m5.1 %>% 
+    tidybayes::spread_draws(mu[i], yhat[i]) 
+post_draw  
+```
+
+```{r}
+post_draw %>% 
+  mean_qi() %>% 
+  mutate(
+    Marriage = d$Marriage,
+    Divorce = d$Divorce
+    )
+```
+
+```{r, fig.width = 5, fig.height = 4.5, message = F}
+post_draw %>%
+  mean_qi() %>%
+  mutate(
+    Marriage = d$Marriage,
+    Divorce = d$Divorce
+  ) %>%
+  ggplot() +
+  geom_ribbon(aes(x = Marriage, ymin = mu.lower, ymax = mu.upper), alpha = 0.2) +
+  #geom_ribbon(aes(x = Marriage, ymin = yhat.lower, ymax = yhat.upper), alpha = 0.2, fill = "red") +
+  geom_line(aes(x = Marriage, y = mu)) +
+  geom_point(aes(x = Marriage, y = Divorce), 
+             shape = 1, size = 2, color = "dodgerblue4", alpha = 0.5) +
+  theme_classic() 
+```
+
+### brms
+
+我们用brms，重新做一遍
+
+```{r b5.1}
+b5.1 <-
+  brm(
+    data = d,
+    family = gaussian,
+    Divorce ~ 1 + Marriage,
+    prior = c(
+      prior(normal(0, 0.2), class = Intercept),
+      prior(normal(0, 0.5), class = b),
+      prior(exponential(1), class = sigma)
+    ),
+    iter = 2000, warmup = 1000, chains = 4, cores = 4,
+    seed = 5,
+    sample_prior = T,
+    file = "fits/b05.01"
+  )
+```
+
+```{r, fig.width = 5, fig.height = 5, message = F}
+d %>% 
+  ggplot(aes(x = Marriage, y = Divorce)) +
+  geom_point(shape = 1, size = 2)
+```
+
+```{r}
+d %>% 
+  tidybayes::add_fitted_draws(model = b5.1, n = 1000) %>% 
+  ggplot(aes(x = Marriage, y = .value, group = .draw)) +
+  geom_line(alpha = 0.1)
+```
+
+```{r, fig.width = 5, fig.height = 4.5, message = F}
+d %>% 
+  tidybayes::add_fitted_draws(model = b5.1, n = 1000) %>% 
+  ggplot(aes(x = Marriage, y = Divorce)) +
+  stat_lineribbon(aes(y = .value), .width = .95) +              # fullrange = T?
+  geom_point(data = d, shape = 1, size = 2, color = "blue") +
+  theme_classic() +
+  scale_fill_manual(values = "grey") +
+  theme(legend.position = "none") +
+  labs(x = "Marriage rate", y = "Divorce rate")
+```
+
+我们看到，这个张图显示结婚率越高，离婚率就越高，那问题来了，是结婚导致离婚？ 只有结婚了才能离婚，因为不结婚就不存在离婚，但两者不存在因果关系。相反，高结婚率意味对价值观、婚姻观有较高的认同度，往往导致离婚率降低，而不应该是高。
+
+## 结婚年龄与离婚率
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;            // number of observations
+  int<lower=1> K;            // number of regressors (including constant)
+  vector[n] Divorce;         // outcome
+  matrix[n, K] X;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;    // scale
+  vector[K] b;                     // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                    // location
+  mu = X * b;
+}
+model {
+  Divorce ~ normal(mu, sigma);    // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 2,
+    y = Divorce,
+    X = model.matrix(~MedianAgeMarriage, .)
+  )
+
+m5.2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+画图书中右边的图
+
+```{r, fig.width = 5, fig.height = 4.5, message = F}
+post_draw <- m5.2 %>% 
+    tidybayes::spread_draws(mu[i], yhat[i]) 
+
+post_draw %>%
+  mean_qi() %>%
+  mutate(
+    MedianAgeMarriage = d$MedianAgeMarriage,
+    Divorce = d$Divorce
+  ) %>%
+  ggplot() +
+  geom_ribbon(aes(x = MedianAgeMarriage, ymin = mu.lower, ymax = mu.upper), alpha = 0.2) +
+  #geom_ribbon(aes(x = MedianAgeMarriage, ymin = yhat.lower, ymax = yhat.upper), alpha = 0.2, fill = "red") +
+  geom_line(aes(x = MedianAgeMarriage, y = mu)) +
+  geom_point(aes(x = MedianAgeMarriage, y = Divorce), 
+             shape = 1, size = 2, color = "dodgerblue4", alpha = 0.5) +
+  theme_classic() 
+```
+
+该图给出的是**该地结婚年龄的中位数**与**离婚率**的关系，应该说这个结婚年龄是解释离婚率变化的很好的因素（结婚年龄越大，离婚率越低），但这个也说不通， 除非结婚年龄很晚，在离婚之前就去世了。
+
+用brms宏包做一遍
+
+```{r b5.2}
+b5.2 <- 
+  brm(data = d, 
+      family = gaussian,
+      Divorce ~ 1 + MedianAgeMarriage,
+      prior = c(prior(normal(0, 0.2), class = Intercept),
+                prior(normal(0, 0.5), class = b),
+                prior(exponential(1), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 5,
+      file = "fits/b05.02")
+```
+
+```{r}
+print(b5.2)
+```
+
+### 我还没弄明白的地方
+
+数据是做了标准化处理的， 所以$\beta = 1$, 意味着1个标准差的年龄波动引起1个标准差输出结果的波动。
+
+Normal(0, 0.5) \> 1 的概率是多大？
+
+```{r}
+mean(rnorm(1000000, mean = 0, sd = 0.5) > 1 )
+```
+
+书中给出结果是5%（我还需要再看）
+
+### 有向无环图
+
+使用[**dagitty**]宏包，
+
+```{r, fig.width=3, fig.height=1.75}
+library(ggdag)
+dagify(M ~ A,
+       D ~ A + M) %>%
+  ggdag(node_size = 8)
+```
+
+弄更好看点呢，这里我们直接指定$A, M, D$三个的坐标
+
+```{r, fig.width=3, fig.height=1.75}
+dag_coords <- 
+  tibble(
+    name = c("A", "M", "D"),
+    x = c(1, 3, 2),
+    y = c(1, 2, 2)
+  )
+
+dagify(
+  M ~ A,
+  D ~ A + M,
+  coords = dag_coords
+) %>% 
+  ggdag() +
+  theme(panel.grid = element_blank())
+```
+
+```{r, fig.width=3, fig.height=1.75}
+dagify(M ~ A,
+       D ~ A + M,
+       coords = dag_coords) %>%
+  
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_point(color = "firebrick", alpha = 1/4, size = 10) +
+  geom_dag_text(color = "firebrick") +
+  geom_dag_edges(edge_color = "firebrick") +
+  scale_x_continuous(NULL, breaks = NULL, expand = c(.1, .1)) +
+  scale_y_continuous(NULL, breaks = NULL, expand = c(.1, .1)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+这里有两层含义：
+
+-   $A \rightarrow D$, 结婚年龄直接影响离婚率，可能年轻人变化快，容易与伴侣产生摩擦
+-   $A \rightarrow M \rightarrow D$, 间接影响，结婚早，结婚率就高
+
+当然，我们需要考虑另外一种模型。$M$ 和 $D$ 之间的本无关联，只是同时受到 $A$ 的影响。
+
+$A$ 同时影响 $M$ 和 $D$ 两个
+
+```{r, fig.width=3, fig.height=1.75}
+library(ggdag)
+dag_coords <- 
+  tibble(
+    name = c("A", "M", "D"),
+    x = c(1, 3, 2),
+    y = c(1, 2, 2)
+  )
+
+dagify(M ~ A,
+       D ~ A,
+       coords = dag_coords) %>%
+  
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_point(color = "firebrick", alpha = 1/4, size = 10) +
+  geom_dag_text(color = "firebrick") +
+  geom_dag_edges(edge_color = "firebrick") +
+  scale_x_continuous(NULL, breaks = NULL, expand = c(.1, .1)) +
+  scale_y_continuous(NULL, breaks = NULL, expand = c(.1, .1)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+  
+```
+
+### 关联
+
+McElreath 鼓励我们去探索这三个变量之间的关联
+
+```{r}
+d %>% 
+  select(MedianAgeMarriage, Marriage, Divorce) %>% 
+  cor()
+```
+
+```{r}
+d %>% 
+  select(MedianAgeMarriage, Marriage, Divorce) %>% 
+  psych::lowerCor(digits = 3)
+```
+
+### 寻找彼此独立的两个变量
+
+```{r}
+library(dagitty)
+dagitty::dagitty('dag{ D <- A -> M}') %>% 
+  impliedConditionalIndependencies()
+```
+
+```{r}
+library(dagitty)
+dagitty('dag{ D <- A -> M -> D}') %>% 
+  impliedConditionalIndependencies()
+```
+
+这里 $A$, $M$ 和 $D$ 之间都不可能是独立的，因此这里没有输出。当然也可以**测试**
+
+```{r}
+library(dagitty)
+dagitty('dag{ D <- A -> M -> D -> T}') %>% 
+  impliedConditionalIndependencies()
+```
+
+## 多元回归模型
+
+$$
+\begin{align*}
+\text{Divorce_std}_i & \sim \operatorname{Normal}(\mu_i, \sigma) \\
+\mu_i   & = \alpha + \beta_1 \text{Marriage_std}_i + \beta_2 \text{MedianAgeMarriage_std}_i \\
+\alpha  & \sim \operatorname{Normal}(0, 0.2) \\
+\beta_1 & \sim \operatorname{Normal}(0, 0.5) \\
+\beta_2 & \sim \operatorname{Normal}(0, 0.5) \\
+\sigma  & \sim \operatorname{Exponential}(1).
+\end{align*}
+$$
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;            // number of observations
+  int<lower=1> K;            // number of regressors (including constant)
+  vector[n] Divorce;         // outcome
+  matrix[n, K] X;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;    // scale
+  vector[K] b;                     // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                    // location
+  mu = X * b;
+}
+model {
+  Divorce ~ normal(mu, sigma);    // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 3,
+    y = Divorce,
+    X = model.matrix(~MedianAgeMarriage + Marriage, .)
+  )
+
+m5.3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+m5.3
+```
+
+用`brms`宏包做一次
+
+```{r b5.3}
+b5.3 <- 
+  brm(data = d, 
+      family = gaussian,
+      Divorce ~ 1 + MedianAgeMarriage + Marriage,
+      prior = c(prior(normal(0, 0.2), class = Intercept),
+                prior(normal(0, 0.5), class = b),
+                prior(exponential(1), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 5,
+      file = "fits/b05.03")
+```
+
+```{r}
+b5.3
+```
+
+现在我们有
+
+| stan | brms |
+|------|------|
+| m5.1 | b5.1 |
+| m5.2 | b5.2 |
+| m5.3 | b5.3 |
+
+下面将三个不同的模型结果整理到数据框，方便画图
+
+```{r}
+res5.1 <- m5.1 %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  mutate(i = c("Intercept", "bM"),
+         model = "m5.1")
+
+res5.2 <- m5.2 %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  mutate(i = c("Intercept", "bA"),
+         model = "m5.2")
+
+res5.3 <- m5.3 %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  mutate(i = c("Intercept", "bA", "bM"),
+         model = "m5.3")
+
+res_stan <- bind_rows(res5.1, res5.2, res5.3) %>% 
+  filter(i != "Intercept")
+
+res_stan
+```
+
+```{r}
+res_stan %>% 
+  ggplot(aes(x = b, xmin = .lower, xmax = .upper, y = model)) +
+  geom_pointrange() +
+  facet_grid(i ~ ., switch = "y") +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_rect(colour = "black", fill = "white")
+  ) +
+  labs(x = NULL, y = NULL)
+```
+
+对brms模型结果，做规整要更简便 `posterior_summary(x, pars = NA, probs = c(0.025, 0.975), robust = FALSE, ...)`
+
+```{r}
+res5.1 <- b5.1 %>% 
+  posterior_summary() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("b") %>%  
+  mutate(model = "m5.1")
+ 
+
+res5.2 <- b5.2 %>% 
+  posterior_summary() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("b") %>% 
+  mutate(model = "m5.2")
+
+res5.3 <- b5.3 %>% 
+  posterior_summary() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("b") %>% 
+  mutate(model = "m5.3")
+
+res_brms <- bind_rows(res5.1, res5.2, res5.3) %>% 
+ filter( b %in% c("b_MedianAgeMarriage", "b_Marriage"))
+
+res_brms
+```
+
+```{r}
+res_brms %>% 
+  mutate(b = as_factor(b) %>% fct_rev()) %>% 
+  ggplot(aes(x = Estimate, xmin = Q2.5, xmax = Q97.5, y = model)) +
+  geom_pointrange() +
+  facet_grid(b ~ ., switch = "y") +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_rect(colour = "black", fill = "white")
+  ) +
+  labs(x = NULL, y = NULL)
+```
+
+### plotting multivariate posteriors
+
+-   Predictor residual plots
+-   Posterior prediction plots
+-   Counterfactual plots
+
+#### predictor residual plots
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;            // number of observations
+  int<lower=1> K;            // number of regressors (including constant)
+  vector[n] y;               // outcome
+  matrix[n, K] X;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;    // scale
+  vector[K] b;                     // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                    // location
+  mu = X * b;
+}
+model {
+  y ~ normal(mu, sigma);          // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 2,
+    y = Marriage,
+    X = model.matrix(~MedianAgeMarriage, .)
+  )
+
+m5.4 <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+summary(m5.4, c("b", "sigma"))$summary
+```
+
+```{r}
+m5.4 %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) 
+```
+
+```{r}
+m5.4 %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95))
+```
+
+```{r, fig.width = 3, fig.height = 3}
+p1 <- m5.4 %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  bind_cols(d) %>% 
+  ggplot(aes(x = MedianAgeMarriage, y = yhat)) +
+  geom_point() +
+  geom_point(aes(x = MedianAgeMarriage, y = Marriage), color = "red") +
+  geom_segment(aes(xend = MedianAgeMarriage, yend = Marriage))
+p1
+```
+
+```{r, fig.width = 3, fig.height = 3}
+m5.4 %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  bind_cols(d) %>% 
+  ggplot(aes(x = Marriage - yhat, y = Divorce)) +
+  geom_point() +
+  geom_smooth(method = lm) +
+  labs(x = "marriage rate residuals", 
+       y = "Divorce rate (std)")
+
+```
+
+下面画右边两张图
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;            // number of observations
+  int<lower=1> K;            // number of regressors (including constant)
+  vector[n] y;               // outcome
+  matrix[n, K] X;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;    // scale
+  vector[K] b;                     // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                    // location
+  mu = X * b;
+}
+model {
+  y ~ normal(mu, sigma);          // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 2,
+    y = MedianAgeMarriage,
+    X = model.matrix(~Marriage, .)
+  )
+
+m5.4b <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+summary(m5.4b, c("b", "sigma"))$summary
+```
+
+```{r}
+m5.4b %>% 
+  tidybayes::spread_draws(b[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) 
+```
+
+```{r}
+m5.4b %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95))
+```
+
+```{r, fig.width = 3, fig.height = 3}
+p2 <- m5.4b %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  bind_cols(d) %>% 
+  ggplot(aes(x = Marriage, y = yhat)) +
+  geom_point() +
+  geom_point(aes(x = Marriage, y = MedianAgeMarriage), color = "red") +
+  geom_segment(aes(xend = Marriage, yend = MedianAgeMarriage))
+p2
+```
+
+```{r, fig.width = 3, fig.height = 3}
+m5.4b %>% 
+  tidybayes::spread_draws(yhat[i]) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  bind_cols(d) %>% 
+  ggplot(aes(x = MedianAgeMarriage - yhat, y = Divorce)) +
+  geom_point() +
+  geom_smooth(method = lm) +
+  labs(x = "marriage rate residuals", 
+       y = "Divorce rate (std)")
+
+```
+
+用brms再做一遍
+
+```{r b5.4}
+b5.4 <- 
+  brm(data = d, 
+      family = gaussian,
+      Marriage ~ 1 + MedianAgeMarriage,
+      prior = c(prior(normal(0, 0.2), class = Intercept),
+                prior(normal(0, 0.5), class = b),
+                prior(exponential(1), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 5,
+      file = "fits/b05.04")
+```
+
+```{r}
+print(b5.4)
+```
+
+```{r, fig.width = 3, fig.height = 3}
+d %>% 
+  tidybayes::add_fitted_draws(b5.4) %>% 
+  ggdist::mean_qi(.width = c(0.95)) %>% 
+  ungroup() %>% 
+  
+  ggplot(aes(x = MedianAgeMarriage, y = .value)) +
+  geom_point() +
+  geom_point(aes(x = MedianAgeMarriage, y = Marriage), color = "red") +
+  geom_segment(aes(xend = MedianAgeMarriage, yend = Marriage))
+```
+
+```{r}
+f <- 
+  fitted(b5.4) %>%
+  as_tibble() %>%
+  bind_cols(d)
+
+glimpse(f)
+```
+
+After a little data processing, we can make the upper left panel of Figure 5.4.
+
+```{r, fig.width = 3, fig.height = 3}
+p1 <-
+  f %>% 
+  ggplot(aes(x = MedianAgeMarriage, y = Marriage)) +
+  geom_point(size = 2, shape = 1, color = "firebrick4") +
+  geom_segment(aes(xend = MedianAgeMarriage, yend = Estimate), 
+               size = 1/4) +
+  geom_line(aes(y = Estimate), 
+            color = "firebrick4") +
+  geom_text_repel(data = . %>% filter(Loc %in% c("WY", "ND", "ME", "HI", "DC")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 14) +
+  labs(x = "Age at marriage (std)",
+       y = "Marriage rate (std)") +
+  coord_cartesian(ylim = range(d$Marriage)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) 
+p1
+```
+
+```{r, fig.width = 3, fig.height = 3, message = F}
+r <- 
+  residuals(b5.4) %>%
+  # To use this in ggplot2, we need to make it a tibble or data frame
+  as_tibble() %>% 
+  bind_cols(d)
+
+p3 <-
+  r %>% 
+  ggplot(aes(x = Estimate, y = Divorce)) +
+  stat_smooth(method = "lm", fullrange = T,
+              color = "firebrick4", fill = "firebrick4", 
+              alpha = 1/5, size = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  geom_point(size = 2, color = "firebrick4", alpha = 2/3) +
+  geom_text_repel(data = . %>% filter(Loc %in% c("WY", "ND", "ME", "HI", "DC")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 5) +
+  scale_x_continuous(limits = c(-2, 2)) +
+  coord_cartesian(xlim = range(r$Estimate)) +
+  labs(x = "Marriage rate residuals",
+       y = "Divorce rate (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+p3
+```
+
+将 `MedianAgeMarriage` 和 `Marriage` 对换，得到模型`b5.4b`
+
+```{r b5.4b}
+b5.4b <- 
+  brm(data = d, 
+      family = gaussian,
+      MedianAgeMarriage ~ 1 + Marriage,
+      prior = c(prior(normal(0, 0.2), class = Intercept),
+                prior(normal(0, 0.5), class = b),
+                prior(exponential(1), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 5,
+      file = "fits/b05.04b")
+```
+
+```{r, fig.width = 3, fig.height = 3}
+p2 <-
+  fitted(b5.4b) %>%
+  as_tibble() %>%
+  bind_cols(d) %>% 
+  
+  ggplot(aes(x = Marriage, y = MedianAgeMarriage)) +
+  geom_point(size = 2, shape = 1, color = "firebrick4") +
+  geom_segment(aes(xend = Marriage, yend = Estimate), 
+               size = 1/4) +
+  geom_line(aes(y = Estimate), 
+            color = "firebrick4") +
+  geom_text_repel(data = . %>% filter(Loc %in% c("DC", "HI", "ID")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 5) +
+  labs(x = "Marriage rate (std)",
+       y = "Age at marriage (std)") +
+  coord_cartesian(ylim = range(d$MedianAgeMarriage)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())   
+p2
+```
+
+```{r, fig.width = 3, fig.height = 3, message = F}
+r <-
+  residuals(b5.4b) %>%
+  as_tibble() %>%
+  bind_cols(d)
+
+p4 <-
+  r %>%
+  ggplot(aes(x = Estimate, y = Divorce)) +
+  stat_smooth(method = "lm", fullrange = T,
+              color = "firebrick4", fill = "firebrick4", 
+              alpha = 1/5, size = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  geom_point(size = 2, color = "firebrick4", alpha = 2/3) +
+  geom_text_repel(data = . %>% filter(Loc %in% c("ID", "HI", "DC")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 5) +
+  scale_x_continuous(limits = c(-2, 3)) +
+  coord_cartesian(xlim = range(r$Estimate),
+                  ylim = range(d$Divorce)) +
+  labs(x = "Age at marriage residuals",
+       y = "Divorce rate (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+p4
+```
+
+```{r, fig.width = 6, fig.height = 6, message = F}
+p1 + p2 + p3 + p4
+```
+
+### posterior prediciton plots
+
+模型m5.3做后验概率预测
+
+```{r, fig.width = 3, fig.height = 3}
+summary(m5.3, c("mu"))$summary %>% 
+  as_tibble() %>% 
+  bind_cols(d) %>% 
+  
+  ggplot(aes(x = Divorce, y = mean, ymin = `25%`, ymax = `75%`)) +
+  geom_pointrange(shape = 1) +
+  geom_abline(slope = 1) +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+```{r}
+m5.3 %>% 
+  tidybayes::spread_draws(mu[i]) %>% 
+  ggdist::mean_qi(.width = c(0.89))
+
+m5.3 %>% 
+  tidybayes::gather_draws(mu[i]) %>% 
+  ggdist::mean_qi(.width = c(0.89))
+```
+
+McElreath给出的89%的可信赖区间
+
+```{r, fig.width = 3, fig.height = 3}
+m5.3 %>% 
+  tidybayes::spread_draws(mu[i]) %>% 
+  ggdist::mean_qi(.width = c(0.89)) %>% 
+  bind_cols(d) %>% 
+  
+  ggplot(aes(x = Divorce, y = mu, ymin = .lower, ymax = .upper)) +
+  geom_pointrange(shape = 1) +
+  geom_abline(slope = 1) +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+  
+```
+
+用brms 做一遍呢
+
+```{r, fig.width = 3, fig.height = 3}
+d %>% 
+  tidybayes::add_fitted_draws(b5.3) %>% 
+  ggdist::mean_qi(.width = c(0.89)) %>% 
+  ungroup() %>% 
+  
+  ggplot(aes(x = Divorce, y = .value, ymin = .lower, ymax = .upper)) +
+  geom_pointrange(shape = 1) +
+  geom_abline(slope = 1)  +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+ASKurz给出的是如下方案，但觉得这里应该是89%才对
+
+```{r, fig.width = 3, fig.height = 3}
+fitted(b5.3) %>%
+  data.frame() %>%
+  # unstandardize the model predictions
+  # mutate_all(~. * sd(d$Divorce) + mean(d$Divorce)) %>% 
+  bind_cols(d) %>%
+  
+  ggplot(aes(x = Divorce, y = Estimate)) +
+  geom_abline(linetype = 2, color = "grey50", size = .5) +
+  geom_point(size = 1.5, color = "firebrick4", alpha = 3/4) +
+  geom_linerange(aes(ymin = Q2.5, ymax = Q97.5),
+                 size = 1/4, color = "firebrick4") +
+  geom_text(data = . %>% filter(Loc %in% c("ID", "UT", "RI", "ME")),
+            aes(label = Loc), 
+            hjust = 1, nudge_x = - 0.25) +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+### 反事实框架下的因果推断 Counterfactual plots 
+
+structural causal model
+
+```{r, fig.width=3, fig.height=1.75}
+dag_coords <- 
+  tibble(
+    name = c("A", "M", "D"),
+    x = c(1, 3, 2),
+    y = c(2, 2, 1)
+  )
+
+dagify(
+  M ~ A,
+  D ~ A + M,
+  coords = dag_coords
+) %>% 
+  ggdag(node_size = 8) +
+  theme(panel.grid = element_blank())
+```
+
+为了模拟出 $A$ 作用于 $M$ 和 $D$ 以及 $A$ 作用于 $M$，需要写出 感觉就像两个独立的模型写在了一起
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> n;                // number of observations
+  int<lower=1> K;                // number of regressors (including constant)
+  vector[n] Divorce;             // outcome
+  matrix[n, K] X;                // regressors
+    
+  int<lower=1> K_M;              // number of regressors (including constant)
+  vector[n] Marriage;             // outcome
+  matrix[n, K_M] X_M;            // regressors
+}
+parameters {
+  real<lower=0,upper=50> sigma;     // scale
+  real<lower=0,upper=50> sigma_M;   // scale
+  vector[K] b;                      // coefficients (including constant)
+  vector[K_M] b_M;                  // coefficients (including constant)
+}
+transformed parameters {
+  vector[n] mu;                      // location
+  vector[n] mu_M;                    // location
+  mu = X * b;
+  mu_M = X_M * b_M;
+}
+model {
+  Divorce ~ normal(mu, sigma);    // probability model
+  sigma ~ exponential(1);         // prior for scale
+  b[1] ~ normal(0, 0.2);          // prior for intercept
+  for (i in 2:K) {                // priors for coefficients
+    b[i] ~ normal(0, 0.5);
+  }
+  //
+  Marriage ~ normal(mu_M, sigma_M);   // probability model
+  sigma_M ~ exponential(1);          // prior for scale
+  b_M[1] ~ normal(0, 0.2);           // prior for intercept
+  for (i in 2:K_M) {                 // priors for coefficients
+    b_M[i] ~ normal(0, 0.5);
+  }
+}
+generated quantities {
+  vector[n] yhat;                   // predicted outcome
+  vector[n] yhat_M;                 // predicted outcome
+  for (i in 1:n) yhat[i] = normal_rng(mu[i], sigma);
+  for (i in 1:n) yhat_M[i] = normal_rng(mu_M[i], sigma_M);
+}
+'
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    K = 3,
+    Divorce = Divorce,
+    X = model.matrix(~MedianAgeMarriage + Marriage, .),
+    #
+    K_M = 2,
+    Marriage = Marriage,
+    X_M = model.matrix(~MedianAgeMarriage, .)
+  )
+
+m5.3_A <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+m5.3_A
+```
+
+用brms再做一遍
+
+代码来源ASKurz， 代码中使用了`set_rescor(FALSE)`目的是两个响应变量`Divorce`和`Marriage`之间没有残差关联(residual correlation)
+
+```{r b5.3_A}
+d_model <- bf(Divorce ~ 1 + MedianAgeMarriage + Marriage)
+m_model <- bf(Marriage ~ 1 + MedianAgeMarriage)
+
+
+b5.3_A <-
+  brm(data = d, 
+      family = gaussian,
+      d_model + m_model + set_rescor(FALSE),
+      prior = c(prior(normal(0, 0.2), class = Intercept, resp = Divorce),
+                prior(normal(0, 0.5), class = b, resp = Divorce),
+                prior(exponential(1), class = sigma, resp = Divorce),
+                
+                prior(normal(0, 0.2), class = Intercept, resp = Marriage),
+                prior(normal(0, 0.5), class = b, resp = Marriage),
+                prior(exponential(1), class = sigma, resp = Marriage)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 5,
+      file = "fits/b05.03_A")
+```
+
+```{r}
+b5.3_A
+```
+
+-   the counterfactual for `Marriage`
+
+```{r, fig.width = 3, fig.height = 3}
+nd <- tibble(MedianAgeMarriage = seq(from = -2, to = 2, length.out = 30),
+             Marriage = 0)
+p1 <-
+  predict(b5.3_A,
+          resp = "Divorce",
+          newdata = nd) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  
+  ggplot(aes(x = MedianAgeMarriage, y = Estimate, ymin = Q2.5, ymax = Q97.5)) +
+  geom_smooth(stat = "identity",
+              fill = "firebrick", color = "firebrick4", alpha = 1/5, size = 1/4) +
+  labs(subtitle = "Total counterfactual effect of A on D",
+       x = "manipulated A",
+       y = "counterfactual D") +
+  coord_cartesian(ylim = c(-2, 2)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) 
+p1
+```
+
+-   the counterfactual for `Divorce`
+
+```{r, fig.width = 6, fig.height = 3}
+nd <- tibble(MedianAgeMarriage = seq(from = -2, to = 2, length.out = 30))
+p2 <-
+  predict(b5.3_A,
+          resp = "Marriage",
+          newdata = nd) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  
+  ggplot(aes(x = MedianAgeMarriage, y = Estimate, ymin = Q2.5, ymax = Q97.5)) +
+  geom_smooth(stat = "identity",
+              fill = "firebrick", color = "firebrick4", alpha = 1/5, size = 1/4) +
+  labs(subtitle = "Counterfactual effect of A on M",
+       x = "manipulated A",
+       y = "counterfactual M") +
+  coord_cartesian(ylim = c(-2, 2)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) 
+p1 + p2
+```
+
+-   the counterfactual for `MedianAgeMarriage`
+
+```{r, fig.width = 3, fig.height = 3}
+nd <- tibble(Marriage = seq(from = -2, to = 2, length.out = 30),
+             MedianAgeMarriage = 0)
+predict(b5.3_A,
+        resp = "Divorce",
+        newdata = nd) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  
+  ggplot(aes(x = Marriage, y = Estimate, ymin = Q2.5, ymax = Q97.5)) +
+  geom_smooth(stat = "identity",
+              fill = "firebrick", color = "firebrick4", alpha = 1/5, size = 1/4) +
+  labs(subtitle = "Total counterfactual effect of M on D",
+       x = "manipulated M",
+       y = "counterfactual D") +
+  coord_cartesian(ylim = c(-2, 2)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) 
+```
+

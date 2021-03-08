@@ -1,0 +1,312 @@
+# 房屋价格 {#house-price}
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+```{r}
+d <- read_csv("./rawdata/house_train.csv")
+glimpse(d)
+```
+
+
+```{r}
+# Load data, select variables, apply log transformation
+df <- read_csv("./rawdata/house_train.csv") %>%
+  select("SalePrice", "LotArea", "Neighborhood") %>%
+  mutate(
+    log_sales_price = log(SalePrice),
+    log_lot_area = log(LotArea),
+    neighbourhood = as.integer(as.factor(Neighborhood))
+  )
+head(df)
+```
+
+
+```{r}
+df %>% count(neighbourhood)
+```
+
+
+```{r}
+df %>%
+  ggplot(aes(x = log_lot_area, y = log_sales_price)) +
+  geom_point(colour = "blue") +
+  geom_smooth(method = lm, se = FALSE, formula = "y ~ x")
+```
+
+
+```{r}
+df %>%
+  ggplot(aes(x = log_lot_area, y = log_sales_price)) +
+  geom_point(aes(colour = neighbourhood)) +
+  geom_smooth(method = lm, se = FALSE, formula = "y ~ x")
+```
+
+
+```{r}
+df %>%
+  ggplot(aes(x = log_lot_area, y = log_sales_price)) +
+  geom_point(colour = "blue") +
+  geom_smooth(method = lm, se = FALSE, formula = "y ~ x", fullrange = TRUE) +
+  facet_wrap(~Neighborhood) +
+  theme(strip.background = element_blank())
+```
+
+
+
+$$
+\begin{align}
+y_i &\sim Normal(\mu_i, \sigma) \\
+\mu_i &= \alpha_{j} + \beta * x_i \\
+\alpha_j & \sim Normal(0, 1)\\
+\beta & \sim Normal(0, 1) \\
+\sigma &\sim \exp(1)
+\end{align}
+$$
+
+
+
+```{r}
+df <- df %>%
+  mutate(
+    log_lot_area_z = as.vector(scale(log_lot_area)),
+    log_sales_price_z = as.vector(scale(log_sales_price))
+  )
+df
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=1> n;           
+  int<lower=1> n_neighbour;      
+  int<lower=1> neighbour[n];     
+
+  vector[n] lot;  
+  vector[n] price;  
+
+  int<lower = 0, upper = 1> run_estimation;
+}
+parameters {
+  vector[n_neighbour] alpha;
+  real beta;
+  real<lower=0> sigma;
+}
+model {
+  vector[n] mu;  
+  
+  for (i in 1:n) {
+   mu[i] = alpha[neighbour[i]] + beta * lot[i];
+  }
+  
+
+  sigma ~ exponential(1);
+  alpha ~ normal(0, 1);
+  beta ~ normal(0, 1);
+
+
+  if(run_estimation==1) {
+      target += normal_lpdf(price | mu, sigma);
+    }
+    
+}
+generated quantities {
+   vector[n] log_lik; //log likelihood
+   vector[n] y_hat;
+   
+   for (j in 1:n) {
+   log_lik[j] = normal_lpdf(price | alpha[neighbour[j]] + beta * lot[j], sigma);
+   y_hat[j]   = normal_rng(alpha[neighbour[j]] + beta * lot[j], sigma);
+   }
+}
+"
+
+
+stan_data <- df %>%
+  tidybayes::compose_data(
+    n_neighbour = n_distinct(neighbourhood),
+    neighbour = neighbourhood,
+    price = log_sales_price_z,
+    lot = log_lot_area_z,
+    run_estimation = 0
+  )
+
+
+mod_only_prior <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+
+```{r}
+df_random_draw <-
+  as.data.frame(mod_only_prior) %>%
+  slice_sample(n = 1)
+
+
+y_sim <- df_random_draw %>%
+  select(contains("y_hat")) %>%
+  pivot_longer(everything()) %>%
+  pull(value)
+
+y_sim %>%
+  as.vector() %>%
+  length()
+```
+
+
+
+
+```{r}
+true_parameters <- df_random_draw %>%
+  select(contains(c("alpha", "beta", "sigma")))
+true_parameters
+
+true_parameters %>%
+  pivot_longer(everything()) %>%
+  rename(parameters = name)
+```
+
+
+
+先验概率检测：模型能否（还原或者包括）模拟时用的参数？
+- 第一次先不likelihood运算, 只是用**指定的先验概率**模拟 `y_hat` 数据
+- 然后用模拟的 `y_hat` 数据**替换**原始`y`数据
+- 这次**真**运行
+- 看模型输出的**后验概率**，能否（还原或者包括）模拟时**指定的先验概率**
+
+```{r}
+stan_data <- df %>%
+  tidybayes::compose_data(
+    n_neighbour = n_distinct(neighbourhood),
+    neighbour = neighbourhood,
+    price = y_sim %>% as.vector(),
+    lot = log_lot_area_z,
+    run_estimation = 1
+  )
+
+
+mod_on_fake_dat <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+parameter_df <- mod_on_fake_dat %>%
+  as.data.frame() %>%
+  select(contains(c("alpha", "beta", "sigma"))) %>%
+  pivot_longer(everything()) %>%
+  rename(parameters = name)
+
+parameter_df %>% head()
+```
+
+
+```{r}
+parameter_df %>%
+  ggplot(aes(x = value)) +
+  geom_density(colour = "blue") +
+  facet_wrap(vars(parameters), scales = "free") +
+  geom_vline(
+    data = true_parameters %>%
+      pivot_longer(everything()) %>%
+      rename(parameters = name),
+    aes(xintercept = value), colour = "red"
+  ) +
+  labs(
+    title = 'Model Checking - red lines are "true" parameters',
+    x = ""
+  ) +
+  theme(strip.background = element_blank())
+```
+
+
+
+感觉tidybayes::add_fit 比较类似的思想
+
+
+
+
+
+## now, Estimate model on real data
+
+`run_estimation=1` and run the code to fit the model.
+
+
+```{r}
+stan_data <- df %>%
+  tidybayes::compose_data(
+    n_neighbour = n_distinct(neighbourhood),
+    neighbour = neighbourhood,
+    price = log_sales_price_z,
+    lot = log_lot_area_z,
+    run_estimation = 1
+  )
+
+
+mod <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+mcmc_combo(
+  as.array(mod),
+  combo = c("dens_overlay", "trace"),
+  pars = c("alpha[1]", "beta", "sigma"),
+  gg_theme = legend_none()
+)
+```
+
+
+
+
+```{r}
+stan_plot(mod,
+  show_density = FALSE,
+  unconstrain = TRUE,
+  pars = c("alpha", "beta", "sigma")
+) +
+  labs(title = "Posterior distributions of fitted parameters")
+```
+
+
+
+
+
+
+```{r}
+print(mod,
+  pars = c("alpha", "beta", "sigma"),
+  probs = c(0.025, 0.50, 0.975),
+  digits_summary = 3
+)
+```
+
+
+
+
+
+## Posterior predictive check 
+
+```{r}
+df %>%
+  ggplot(aes(x = log_sales_price_z)) +
+  geom_density()
+```
+
+
+
+
+```{r}
+yrep <- extract(mod)[["y_hat"]]
+samples <- sample(nrow(yrep), 300)
+ppc_dens_overlay(as.vector(df$log_sales_price_z), yrep[samples, ])
+```

@@ -19,6 +19,7 @@ rmd_files: [
   "NASA_chi_square_test.Rmd",
   "vaccine_effectiveness.Rmd",
   "complaint_traps_hierarchical.Rmd",
+  "golf.Rmd",
   "wait_coffe.Rmd",
   "sleepstudy.Rmd",
   "Homicides.Rmd",

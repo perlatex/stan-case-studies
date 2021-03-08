@@ -61,11 +61,18 @@ knitr::opts_chunk$set(
 - 第 \@ref(NASA) 章航天事业的预算有党派门户之见？
 - 第 \@ref(vaccine) 章疫苗有效性的计算
 - 第 \@ref(complaints) 章物业经理的困惑蟑螂投诉的案例
+- 第 \@ref(golf) 章高尔夫球
+- 第 \@ref(time-series) 章时间序列
+- 第 \@ref(house-price) 章房屋价格
+- 第 \@ref(irt) 章电影评分倾向
+- 第 \@ref(worldcup) 章世界杯
+- 第 \@ref(waffle) 章吃华夫饼会导致离婚？
 - 第 \@ref(wait-coffe) 章咖啡等待时间
 - 第 \@ref(sleepstudy) 章睡眠剥夺后的反应时间
 - 第 \@ref(homicides) 章在人口普查上估计凶杀案数量 
 - 第 \@ref(sir) 章流行病模型
 - 第 \@ref(nonlinear) 章非线性模型
+- 第 \@ref(Gaussian-processes) 章寻找系外行星
 
 
 

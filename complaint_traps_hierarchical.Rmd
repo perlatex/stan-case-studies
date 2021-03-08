@@ -1,6 +1,6 @@
 # 物业经理的困惑 {#complaints}
 
-```{r libraries, echo = FALSE}
+```{r}
 library(tidyverse)
 library(tidybayes)
 library(rstan)
@@ -9,13 +9,13 @@ options(mc.cores = parallel::detectCores())
 ```
 
 
-蟑螂投诉的案例，
-一方面担心投诉太多降低威望，一方面担心部署太多蟑螂诱捕器需要花费太多费用
+[蟑螂投诉的案例](https://github.com/jgabry/bayes-workflow-book)，
+物业经理一方面担心投诉太多降低威望，一方面担心部署太多蟑螂诱捕器需要花费太多费用
 
 ## 数据
 
 ```{r}
-pest <- readRDS("./data/pest_data.RDS")
+pest <- readRDS("./rawdata/pest_data.RDS")
 pest
 ```
 

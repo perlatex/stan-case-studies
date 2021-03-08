@@ -1,0 +1,244 @@
+# 时间序列 {#time-series}
+
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+```{r}
+series <- matrix(
+  scan("./rawdata/Series1000.txt"),
+  nrow = 1000, ncol = 135, byrow = TRUE
+)
+dim(series)
+```
+
+```{r}
+d <- series %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "n") %>% 
+  pivot_longer(
+    cols = -n
+  ) %>% 
+  mutate(n = as.numeric(n))
+d
+```
+
+
+```{r}
+d %>% 
+  ggplot(aes(x = n, y = value, group = name)) +
+  geom_line()
+```
+
+
+```{r}
+d %>% count(name)
+```
+
+```{r}
+d %>% 
+  group_by(name) %>% 
+  summarise(
+   broom::tidy(lm(value ~ n, data = cur_data()))
+   ) %>% 
+  filter(term == "n") %>% 
+  ggplot(aes(x = estimate * 100, y = std.error * 100)) +
+  geom_point()
+```
+
+```{r}
+d %>% 
+  group_by(name) %>% 
+  summarise(
+   broom::tidy(lm(value ~ n, data = cur_data()))
+   ) %>% 
+  filter(term == "n") %>% 
+  ggplot(aes(x = estimate * 100)) +
+  geom_histogram(binwidth = 0.1)
+```
+
+
+有理由相信，斜率是一个正态分布的
+
+
+
+```{r}
+slope <- d %>% 
+  group_by(name) %>% 
+  summarise(
+   broom::tidy(lm(value ~ n, data = cur_data()))
+   ) %>% 
+  filter(term == "n") %>% 
+  pull(estimate)
+slope
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int K;
+  int N;
+  vector[N] y;
+  vector[K] mu;
+}
+parameters {
+  simplex[K] theta;
+  real sigma;
+}
+model {
+  vector[K] lps;
+  sigma ~ cauchy(0, 2.5);
+  mu ~ normal(0 ,10);
+  
+  for(i in 1:N) {
+     for(k in 1:K) {
+         lps[k] = log(theta[k]) + normal_lpdf(y[i] | mu[k], sigma);
+     }
+    target += log_sum_exp(lps);
+  }
+}
+
+generated quantities {
+  matrix[N, K] p;
+  
+  for (n in 1:N) {
+     vector[K] p_raw;
+     
+     for (k in 1:K) {
+      p_raw[k] = theta[k] * exp(normal_lpdf(y[n] | mu[k], sigma));
+     }
+     
+     for (k in 1:K) {
+       p[n, k] = p_raw[k]/sum(p_raw);
+      }
+  }
+  
+}
+'
+
+stan_data <- list(y  = slope * 100, 
+                  N  = length(slope),  
+                  K  = 3, 
+                  mu = c(-1, 0, 1)
+                  )
+
+fit_mixture_normal <- stan(model_code = stan_program, data = stan_data)
+```
+ 
+ 参考(https://mc-stan.org/docs/2_25/stan-users-guide/summing-out-the-responsibility-parameter.html)
+
+
+
+## tidybayes提取矩阵样本
+
+用tidybayes的方法，但感觉有点慢，用spread_draws() 抽样，格式很规范，但速度比较慢, 
+<https://github.com/mjskay/uncertainty-examples/blob/master/multivariate-regression.md#the-directly-in-stan-model>
+
+```{r}
+fit_mixture_normal %>% 
+  tidybayes::spread_draws(p[., .])
+```
+
+```{r}
+tt <- fit_mixture_normal %>% 
+  tidybayes::spread_draws(p[., .]) %>% 
+  head(2)
+tt
+
+prob <- 
+  tt %>% 
+  mutate(
+    p_df = purrr::map(p, ~as_tibble(.) %>% mutate(n = 1:n()))
+  ) %>% 
+  unnest(p_df) %>% 
+  group_by(n) %>% 
+  summarise(
+    across(starts_with("V"), mean)
+  )
+
+prob
+```
+
+
+
+## 土办法提取矩阵样本
+因此，我们不用上面的方法，而用书上的方法
+
+```{r}
+rstan::extract(fit_mixture_normal)$p %>% class()
+```
+
+```{r}
+prob_sims <-
+  fit_mixture_normal %>% 
+  rstan::extract(pars = "p") %>% 
+  purrr::pluck("p")
+
+
+prob <- matrix(NA, nrow = 1000, ncol = 3)
+
+for (n in 1:1000){
+  for (k in 1:3){
+    prob[n,k] <- mean(prob_sims[, n, k])
+  }
+}
+
+prob
+```
+
+矩阵变为数据框后，看一行中哪个最大，最大的变为1，表示被选中，其余的变为0
+
+```{r}
+replace_col_max <- function(vec) {
+  if (!is.vector(vec)) {
+    stop("input of replace_col_max must be vector.")
+  }
+
+  if_else(vec == max(vec), 1L, 0L)
+}
+
+prob %>%
+  as_tibble() %>%
+  rowwise() %>%
+  mutate(
+    new = list(replace_col_max(c_across(starts_with("V")))),
+    max_prob = max(c_across(starts_with("V")))
+  ) %>%
+  unnest_wider(new, names_sep = "_") %>% 
+  summarise(
+    across(starts_with("new_"), sum),
+    sum = sum(max_prob),
+    sd_correct = sqrt(sum(max_prob*(1-max_prob)))
+  )
+```
+
+
+
+```{r}
+prob
+apply(prob, 1, max)
+apply(prob, 1, max) %>% sum()
+apply(prob, 1, which.max)
+```
+
+
+
+<details><summary>Session Info</summary>
+```{r eda-worldcup-7, echo=FALSE}
+sessioninfo::session_info()
+```
+</details>
+

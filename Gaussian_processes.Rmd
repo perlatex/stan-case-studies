@@ -1,0 +1,625 @@
+# 寻找系外行星 {#Gaussian-processes}
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+```
+
+
+## 目的
+
+重复[youtube video](https://www.youtube.com/watch?v=132s2B-mzBg)上的问题，数据来源[github](https://github.com/MaggieLieu/STAN_tutorials)
+
+
+## 高斯 Gaussian Process
+
+In practice for given set of data points, there are an infinity number of functions that could provide a good fit. 
+
+Gaussian processes assign each of the possible function a probability.
+and the mean over the probability distribution provides the most probable 
+fit to the data. Therefore a Gaussian process is a probabilistic method that gives the confidence for the predicted line.
+It is a prior over functions `P(f)` that can be used for 
+bayesian regression.
+
+$$
+P(f) = GP(\mu(x), k(x|\theta))
+$$
+
+
+Similar to a simple multivariate normal distribution which
+is parameterized by a mean vector `mu` and a covariance matrix
+sigma. A Gaussian process is parameterized by a mean function 
+`mu` and a covariate function `k` where $\theta$ are the
+parameters of the specific kernel.
+
+
+
+The mean function `mu`
+is self-expanatory, the mean over all possible functions
+sampled from the Gaussian process will recover this function.
+
+The covariance function is a covariance kernel applied on all
+**pairwise data points**. it determines the variation in the
+functions of the Gaussian process. The mean function can be
+anything, but the covariance function must produce a positive
+definite matrix for the input `x`.
+
+A multivariate Gaussian distribution has the same number of
+dimensions as the number of random variables.
+So for `n` data points we have an `n` dimensional multivariate
+Gaussian distribution. Predicted functions made from the Gaussian
+process are samples drawn from this huge multivariate Gaussian distribution.
+The observed data `y` are then drawn from each sampled function
+$$
+y \sim N(f, \sigma^2)
+$$
+Typically assuming a Gaussian likelihood, the most common kernel
+used in Gaussian process is the RBF kernel. sometimes also known as 
+the **Exponentiated quadratic kernel**. The resulting covariance matrix
+looks like this
+$$
+K(x|\alpha, \rho)_{i, j} = \alpha^2 \exp \left(         -
+\dfrac{1}{2\rho^2} \sum_{d=1}^D (x_{i,d} - x_{j,d})^2 \right)
+$$
+
+As you can see from the functional form, it's defined by two 
+parameters: 
+
+- $\alpha$ is the marginal standard deviation, it measures the average distance from the mean function. 
+- $\rho$ the length scale is the frequency of the functions represented by the Gaussian process, essentially it's a measure of the influence on neighboring points. row values close to zero represent high frequency functions, so each point has less influence on the neighbors, whereas high row values give rise to low frequency functions that have more influence on the neighbors.
+
+
+The periodic kernel is often the kernel used when you are 
+interested in modeling fluctuations that repeat themselves exactly.
+It's defined as follows 
+
+$$
+K(x|\alpha, \rho, p)_{i, j} = \alpha^2 \exp \left(         -
+\dfrac{2}{\rho^2} \sum_{d=1}^D \sin^2\left(\dfrac{\pi|x_{i,d} - x_{j,d}|}{p}\right) \right)
+$$
+
+where $\alpha$ and $\rho$ share the same role as defined for the RBF kernel,
+but additionally it requires a parameter `p` for the periodicity.
+This determines the distance between repetitions. There are so many more different kernels that can be chosen, each with their different parameters.
+
+Different kernels can also be combined together through addition multiplication and convolution(乘法和卷积). But the choice of kernel will affect the generalizational properties of your Gaussian process, so it's really important that you choose 
+something that is suitable for you problem. this is out of the scope for this tutorial.
+
+## stan
+we are going to use Stan to sample functions from a Gaussian process. 
+
+
+- 协方差矩阵，we are using the `expoinentiated quadratic` given by the function
+`cov_exp_quad()`, plus a small constant added to the diagonal to ensure a positive definite matrix that it is symmetric and the eigenvalues and positive.
+
+
+
+# Simulating from a gaussian process
+
+这里`x = seq(-10, 10, length.out = 100)` 定义等距的空间点，用来刻画协方差矩阵，这个协方差矩阵有100*100大小
+
+这些点x坐标，看成地理位置上的点，协方差矩阵，通过彼此距离的远近代表两个点之间的相关性
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;           //number of data points
+  real x[N];                //data
+  real<lower=0> alpha;
+  real<lower=0> rho;
+}
+
+transformed data {
+  matrix[N,N] K = cov_exp_quad(x, alpha, rho) + diag_matrix(rep_vector(1e-9,N));        // Covariance function
+  vector[N] mu = rep_vector(0,N);       //mean
+}
+
+generated quantities {
+  vector[N] f = multi_normal_rng(mu, K);  // only one point
+}
+"
+
+stan_data <- list(
+  N = 100,
+  x = seq(-10, 10, length.out = 100), # equally spaced points
+  alpha = 1,
+  rho = 1
+)
+
+
+fit <- stan(
+  model_code = stan_program, 
+  data = stan_data,
+  algorithm = 'Fixed_param',
+  warmup = 0, 
+  chains = 1, iter = 1000
+  )
+```
+
+
+
+```{r}
+params <- extract(fit)
+params
+```
+
+
+- points 100
+- iters  1000
+- ndraw  200 (ndraw < iters)
+
+
+如果在`tidybayes::gather_draws()`不指定ndraw，它就会使用stan代码中的iters的数量，比如这里的iters =1000，所以最后的tibble是 100 * 1000. 当然，我们可以只抽取部分，比如在`tidybayes::gather_draws(f[i], n= 500)`
+
+
+```{r}
+raw <- tibble(
+   i = 1:100,
+   x = seq(-10, 10, length.out = 100)
+)
+raw
+```
+
+
+
+```{r}
+average <- fit %>% 
+  tidybayes::gather_draws(f[i]) %>%
+  tidybayes::mean_qi() %>%
+  ungroup()
+average
+```
+
+
+```{r}
+average %>% 
+  ggplot(aes(x = i, y = .value)) +
+  geom_point(color = "red") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper), alpha = 0.1)
+```
+
+
+```{r}
+res <- fit %>% tidybayes::gather_draws(f[i])
+res %>% 
+  ungroup() %>%
+  select(i, .draw, .value) %>%
+  group_by(i) %>%
+  nest()
+```
+
+
+
+```{r}
+res <- fit %>% tidybayes::gather_draws(f[i], n = 50)
+res %>% 
+  ungroup() %>%
+  left_join(raw, by = "i") %>%
+  ggplot() +
+  geom_line(aes(x = i, y = .value, group = .draw)) +
+  geom_point(data = average, aes(x = i, y = .value), color = "red")
+```
+
+
+
+## Real data
+
+we are going to apply our newly learn skills to astronomical light curves, the data is the observed flux, or the light from this star.
+ 
+ 
+ 
+```{r}
+rawdata <- read_csv(here::here("rawdata", "kplr003632418-2009131105131_llc.csv"))
+rawdata
+```
+
+
+```{r}
+glimpse(rawdata)
+```
+
+```{r}
+rawdata %>% 
+  ggplot(aes(x = TIME, y = SAP_FLUX)) +
+  geom_point()
+```
+
+
+
+```{r}
+d <- rawdata %>%
+  filter(!is.na(SAP_FLUX)) %>%
+  mutate(
+    across(SAP_FLUX, ~ (.x - mean(.x))/sd(.x))
+  ) %>%
+  mutate(i = 1:n()) %>%
+  select(i, TIME, SAP_FLUX)
+d
+```
+
+As you can see the light is not constant it goes up and down, now this can be due to noise, it can be due to the rotation of the star, but very occasionally you might get
+periodic dips(周期性下降) in the light that could correspond to a planet orbiting the star(围绕恒星运行的行星), and blocking out some of the star's light as it moves in front of it.
+
+Assuming that the output of our Gaussian process is normal, there are two ways that we can approach fitting the gp.
+
+### Latent Variable Gaussian Process
+
+__method one__ which we call the latent variable Gaussian Process
+is a full generative model in that each Gaussian process function is 
+drawn from the multivariate normal distribution. 
+Data generated with Gaussian white noise about a function `f`
+is modeled by the following likelihood.
+
+
+$$
+f \sim \text{multivariate_normal}(0, K)
+$$
+
+Observations:
+$$
+P(y|f) = \text{normal}(0, \sigma^2)
+$$
+### Marginal Likelihood Gaussian Process
+
+if we don't care about the functions themselves and only about the parameters of the Gaussian process, we can use __method two__, the marginal likelihood Gaussian process, whereby we integrate over all functions to obtain the marginal likelihood. 
+
+$$
+P(y) = \int dfP(y|f) P(f)
+$$
+
+
+This is equivalent to this
+
+$$
+P(y) = \text{multivariate_normal}(0, K)
+$$
+
+The sigma squared added to the diagonal also ensures that the resulting matrix is positive definite. **This can speed up the computation significantly, because the inference is made over a much lower dimensional parameter space**.
+
+so let's begin with __method two__ the Marginal Likelihood Gaussian Process
+
+the Stan model looks like the following.
+
+
+数学公式呢？
+
+- 认为每个点都是服从(均值mu为0，方差sigma= 波动)，但彼此相邻的两点都有协方差
+
+
+
+```{r}
+stan_data <- d %>%
+  tidybayes::compose_data(
+    N = nrow(.),
+    x = TIME,
+    y = SAP_FLUX
+  )
+```
+
+In model block we also declare the chileski decomposition of the covariance function. Decomposing the matrix into a lower triangular matrix and its conjugate transpose and working with the lower triangular matrix is much more numerically stable or efficient to work with when dealing with very large matrices
+
+$$
+K = L L^T \\
+\text{L is lower triangular matrix}
+$$
+
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;
+  real x[N];
+  vector[N] y;
+}
+
+transformed data {
+  vector[N] mu = rep_vector(0,N);
+}
+
+parameters {
+  real<lower=0> rho;
+  real<lower=0> alpha;
+  real<lower=0> sigma;
+}
+
+model {
+  matrix[N,N] K = cov_exp_quad(x, alpha, rho) + diag_matrix(rep_vector(square(sigma),N));
+  matrix[N,N] L_K = cholesky_decompose(K);
+
+  rho ~ normal(0, 3);
+  alpha ~ normal(0, 1);
+  sigma ~ normal(0, 1);
+
+  y ~ multi_normal_cholesky(mu, L_K);
+}
+
+"
+
+fit2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+saveRDS(fit2, "fit2.rds")
+```
+
+
+```{r}
+fit2 <- readRDS("fit2.rds")
+```
+
+
+
+
+
+```{r}
+params <- extract(fit2)
+alpha  <- mean(params$alpha)
+rho    <- mean(params$rho)
+sigma  <- mean(params$sigma)
+```
+
+得到系数后，那怎么放入公式中？又如何画出拟合的曲线，步骤是这样的，
+
+
+
+- 计算样本均值，得到参数
+- 将参数返回到stan_code的`cov_exp_quad()`中得到K， 最后用`multi_normal_rng(mu, K)`得到预测值
+-  this is because the gp is not conditioned on the data yet. 这句话我没懂
+(alpha, rho 不是曲线的系数么？一对的alpha/rho, 一条曲线)， 我有了alpha/rho，就应该可以画出曲线了啊
+
+
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;           // number of data points
+  real x[N];                // data
+  real<lower=0> alpha;
+  real<lower=0> rho;
+}
+
+transformed data {
+  matrix[N,N] K = cov_exp_quad(x, alpha, rho) + diag_matrix(rep_vector(1e-9,N));        // Covariance function
+  vector[N] mu = rep_vector(0,N);       // mean
+}
+
+generated quantities {
+  vector[N] f = multi_normal_rng(mu, K);  // N data points
+}
+"
+
+# stan_data <- list(
+#   N = 500,
+#   x = seq(120, 132, length.out = 500), 
+#   alpha  = mean(params$alpha),
+#   rho    = mean(params$rho)
+# )
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+  N = nrow(.),
+  x = TIME, 
+  alpha  = mean(params$alpha),
+  rho    = mean(params$rho)
+)
+
+
+gen_sam <- stan(
+  model_code = stan_program, 
+  data = stan_data,
+  algorithm = 'Fixed_param',
+  warmup = 0, 
+  chains = 1, 
+  iter = 1000
+  )
+```
+
+
+
+```{r}
+saveRDS(gen_sam, "gen_sam.rds")
+```
+
+
+```{r}
+gen_sam <- readRDS("gen_sam.rds")
+```
+
+
+```{r}
+res <- gen_sam %>% tidybayes::gather_draws(f[i], n = 1000)
+res %>% 
+  ungroup() %>%
+  ggplot() +
+  geom_line(aes(x = i, y = .value, group = .draw), alpha = 0.1) +
+  geom_point(data = d, aes(x = i, y = SAP_FLUX), color = "red" )
+```
+
+they don't seem to quite fit the observed data so well, this is because the gp is not conditioned on the data yet. 这句话我没懂，`y ~ multi_normal_cholesky(mu, L_K);` 难道不是conditioned on the data吗？
+
+
+
+## predict
+To make predictions conditional data the data, we can rewrite it as
+the following
+
+$$
+P(y_2|y_1,x_1, x_2, f) = P(y_2, y1|x_2, x_1, x_2, f)/P(y_1|x_1, f)
+$$
+
+
+
+In other words, we need to model the distribution of the 
+observed variants `y1` and the to be predicted variants `y2` jointly.
+We can do this using latent variable model, .ie, model one
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N1;                           //number data observed
+  real x1[N1];
+  vector[N1] y1;
+  int<lower=1> N2;                           //number to be predicted
+  real x2[N2];
+}
+
+transformed data{
+  int<lower=1> N = N1 + N2;
+  real x[N];                                 //number all
+  for (n1 in 1:N1) x[n1] = x1[n1];
+  for (n2 in 1:N2) x[N1 + n2] = x2[n2];
+}
+
+parameters {
+  real<lower=0> rho;
+  real<lower=0> alpha;
+  real<lower=0> sigma;
+  vector[N] eta;
+}
+
+transformed parameters {
+  vector[N] f;
+  {
+  matrix[N,N] K = cov_exp_quad(x, alpha, rho) + diag_matrix(rep_vector(1e-9, N));
+  matrix[N,N] L_K = cholesky_decompose(K);
+  f = L_K * eta;
+  }
+}
+
+model {
+  rho ~ normal(0,3);
+  alpha ~ normal(0,1);
+  sigma ~ normal(0,1);
+  eta ~ normal(0,1);
+
+  y1 ~ normal(f[1:N1], sigma);
+}
+
+generated quantities {
+  vector[N2] y2;
+  for(n2 in 1:N2)
+    y2[n2] = normal_rng(f[N1 + n2], sigma);
+}
+"
+
+
+N_predict <- 100
+x_predict <- seq(range(d$TIME)[1], 132, length.out = N_predict)
+
+d <- d %>% 
+  dplyr::sample_n(200)
+
+pred_data <- list(
+  N1 = nrow(d), 
+  x1 = d$TIME, 
+  y1 = d$SAP_FLUX, 
+  N2 = N_predict, 
+  x2 = x_predict
+  )
+
+pred_fit <- stan(model_code = stan_program, 
+                 data = pred_data,
+                 iter = 1000, 
+                 chains = 1
+                 ) 
+```
+
+
+```{r}
+saveRDS(pred_fit, "pred_fit.rds")
+```
+
+
+```{r}
+pred_fit <- read_rds("pred_fit.rds")
+```
+
+
+
+```{r}
+pred_params <- extract(pred_fit)
+#pred_params 
+```
+
+```{r}
+yr = c(-2,2)
+xr = c(120, 132)
+N_obs <- 200
+plot(xr, yr, ty='n')
+for( i in 1:500){
+  lines(x_predict, pred_params$f[i,(N_obs+1):(N_obs+N_predict)], col=rgb(0,0,0,0.1))
+}
+#points(data$x, data$y, pch=20, col='orange', cex=0.3)
+```
+
+
+
+
+```{r}
+
+pred_fit %>% 
+  tidybayes::gather_draws(f[i]) %>%  # .iteration 有多少，就.draw多少
+  filter(i > 200) %>%                # 只看预测值 
+  ungroup() %>%
+  ggplot() +
+  geom_line(aes(x = i, y = .value, group = .draw), alpha = 0.1) +
+  theme_classic()
+```
+
+
+## 用隐变量模型，重新做一遍，自己预测自己
+
+参数要放在transformed parameters block中，才能传递到generated quantities使用
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;
+  real x[N];
+  vector[N] y;
+}
+
+transformed data {
+  vector[N] mu = rep_vector(0,N);
+}
+
+parameters {
+  real<lower=0> rho;
+  real<lower=0> alpha;
+  real<lower=0> sigma;
+}
+transformed parameters {
+  matrix[N,N] K = cov_exp_quad(x, alpha, rho) + diag_matrix(rep_vector(square(sigma),N));
+  matrix[N,N] L_K = cholesky_decompose(K);
+
+}
+model {
+  rho ~ normal(0, 3);
+  alpha ~ normal(0, 1);
+  sigma ~ normal(0, 1);
+
+  y ~ multi_normal_cholesky(mu, L_K);
+}
+
+generated quantities {
+  vector[N] y_pred;
+  y_pred = multi_normal_cholesky_rng(mu, L_K);
+ // vector[N] f = multi_normal_rng(mu, K);  // N data points
+}
+"
+
+stan_data <- d %>%
+  tidybayes::compose_data(
+    N = nrow(.),
+    x = TIME,
+    y = SAP_FLUX
+  )
+
+fit22 <- stan(model_code = stan_program, data = stan_data)
+```
+
+## 未完待续
+
+

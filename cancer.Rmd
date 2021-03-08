@@ -20,55 +20,49 @@ cancer
 
 
 
-## Two Sample Binomial Model
+## 二项模型
 
-In implementing this model, we have just two data points (cancer patients and
-control group) and a binomial sampling model, in which the population
-proportions of smokers in each group appear as parameters.  Quantities of
-interest such as the difference in the population proportions and the log of
-the odds ratio are computed in the generated quantities section. Uniform priors
-on the population proportions are used in this example.
 
+为完成这个二项抽样模型，将每组数据里吸烟人数的比例$\pi_i$作为参数，并使用uniform先验概率分布
 $$
 \begin{aligned}[t]
 r_i &\sim \mathsf{Binomial}(n_i, \pi_i)
 \end{aligned}
 $$
-Additionally the difference,
+吸烟比例的差值为
 $$
 \delta = \pi_1 - \pi_2 ,
 $$
-and the log-odds ratio,
-$$
-\lambda = \log\left(\frac{\pi_1}{1 - \pi_1}\right) - \log \left( \frac{\pi_2}{1 - \pi_2} \right) ,
-$$
 
-It places uniform priors (Beta priors) are placed on $\pi$,
+
+并让$\pi$使用uniform先验概率分布
 $$
 \begin{aligned}
 \pi_i &\sim \mathsf{Beta}(1, 1)
 \end{aligned}
 $$
 
-The difference between and log odds ratio are defined in the `generated quantities` block.
+
+
+在`generated quantities` block中计算了比例log-odds ratio之差
+$$
+\lambda = \log\left(\frac{\pi_1}{1 - \pi_1}\right) - \log \left( \frac{\pi_2}{1 - \pi_2} \right) ,
+$$
 
 
 
-The Stan model for this is:
+具体 Stan 模型如下
 ```{r}
 cancer_mod1 <- "
 data {
   int<lower = 0> r[2];
   int<lower = 1> n[2];
-  // param for beta prior on p
-  vector<lower = 0>[2] p_a;
-  vector<lower = 0>[2] p_b;
 }
 parameters {
   vector<lower = 0, upper = 1>[2] p;
 }
 model {
-  p ~ beta(p_a, p_b);
+  p ~ beta(1, 1);
   r ~ binomial(n, p);
 }
 generated quantities {
@@ -88,10 +82,7 @@ generated quantities {
 
 cancer_data <- list(
   r = cancer$smokers,
-  n = cancer$n,
-  # beta prior on pi
-  p_a = rep(1, 2),
-  p_b = rep(1, 2)
+  n = cancer$n
 )
 
 
@@ -104,9 +95,10 @@ cancer_fit1 <- stan(model_code = cancer_mod1, data = cancer_data)
 cancer_fit1
 ```
 
-## Binomial Logit Model of the Difference
+## 二项Logit模型
 
-An alternative parameterization directly models the difference in the population proportion.
+
+另外一种方法，就是直接模拟比例之差，这里需要用到参数$\alpha$ 和 $\beta$，每组数据的比例都是参数的log-odds
 
 $$
 \begin{aligned}[t]
@@ -115,7 +107,8 @@ r_i &\sim \mathsf{Binomial}(n_i, \pi_i) \\
 \pi_2 &= \frac{1}{1 + \exp(-\alpha))}
 \end{aligned}
 $$
-The parameters $\alpha$ and $\beta$ are given weakly informative priors on the log-odds scale,
+这里设定$\alpha$ 和$\beta$ 弱先验信息
+
 $$
 \begin{aligned}
 \alpha &\sim N(0, 10)\\
@@ -123,17 +116,11 @@ $$
 \end{aligned}
 $$
 
-```{r cancer_mod2,results='hide',cache.extra=tools::md5sum("stan/cancer2.stan")}
-
+```{r cancer_mod2}
 stan_program <- "
 data {
   int<lower = 0> r[2];
   int<lower = 1> n[2];
-  // param for beta prior on p
-  real a_loc;
-  real<lower = 0.> a_scale;
-  real b_loc;
-  real<lower = 0.> b_scale;
 }
 parameters {
   real a;
@@ -145,8 +132,8 @@ transformed parameters {
   p[2] = inv_logit(a);
 }
 model {
-  a ~ normal(a_loc, a_scale);
-  b ~ normal(a_loc, b_scale);
+  a ~ normal(0, 10);
+  b ~ normal(0, 2.5);
   r ~ binomial(n, p);
 }
 generated quantities {
@@ -161,32 +148,25 @@ generated quantities {
   lambda_up = lambda > 0;
 
 }
+"
 
+cancer_data <- list(
+  r = cancer$smokers,
+  n = cancer$n
+)
+
+
+cancer_fit2 <- stan(model_code = stan_program, data = cancer_data)
 ```
 
 
-Re-use `r` and `n` values from `cancer_data`, but add the appropriate values for the prior distributions.
-```{r cancer_data2}
-cancer_data2 <- within(cancer_data, {
-  p_a <- p_b <- NULL
-  a_loc <- b_loc <- 0
-  a_scale <- 10
-  b_scale <- 2.5
-})
-```
-
-Sample from the model:
-```{r cancer_fit2,results='hide'}
-cancer_fit2 <- sampling(cancer_mod2, cancer_data2)
-```
 ```{r}
 cancer_fit2
 ```
 
-## Questions
 
-1.  Expression the Binomial Logit model of the Difference as a regression
-1.  What number of success and failures is a `Beta(1,1)` prior equivalent to?
+
+## 参考
 
 [^cancer]: This example is derived from Simon Jackman,
     "[Cancer: difference in two binomial proportions](https://web-beta.archive.org/web/20070601000000*/http://jackman.stanford.edu:80/mcmc/cancer.odc)",
