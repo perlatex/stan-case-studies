@@ -1,0 +1,367 @@
+# 儿童智力发育？ {#kidiq}
+
+案例来源[Gelman Hill textbook](https://mc-stan.org/rstanarm/reference/rstanarm-datasets.html)，这个数据包括儿童考试成绩，母亲是否完成高中，母亲的IQ值以及母亲年龄
+
+```{r}
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+```
+
+
+## 导入数据
+
+```{r}
+kidiq <- read_rds("./rawdata/kidiq.RDS") 
+kidiq
+```
+
+
+## 探索性分析
+
+探索你感兴趣的三个问题，要求用表格或者图形，并给出解释
+
+```{r}
+kidiq %>% 
+  mutate(mom_hs = as_factor(mom_hs)) %>% 
+  ggplot(aes(kid_score, mom_iq, color = mom_hs)) + 
+  geom_point()
+```
+
+
+```{r}
+kidiq %>% 
+  mutate(mom_hs = as_factor(mom_hs)) %>% 
+  ggplot(aes(fill= mom_hs, mom_age)) + 
+  geom_density(alpha = 0.2)
+```
+
+```{r}
+kidiq %>% 
+  mutate(mom_hs = as_factor(mom_hs)) %>% 
+  ggplot(aes(mom_iq, fill = mom_hs)) + 
+  geom_histogram(position = 'dodge', aes(y = stat(density)))
+```
+
+
+## 估计儿童考试成绩的均值
+
+我们需要估计儿童考试成绩的均值和标准差，这里贴出了stan代码，注意到，在`data block `需要我们喂给它必要的数据，
+
+- 结果变量 `y`
+- 观察数量 `N`
+- 均值`mu`的先验概率密度函数的均值和方差
+
+
+
+运行代码：
+
+
+```{r}
+stan_program <- "
+data {
+  int<lower=0> N;          // number of kids
+  vector[N] y;             // scores
+}
+parameters {
+  real mu; 
+  real<lower=0> sigma;
+}
+transformed parameters {
+}
+model {
+  //priors
+  mu ~ normal(80, 100);
+  sigma ~ normal(0,10);
+  
+  //target += normal_lpdf(y | mu, sigma);
+  //equivalent:
+  y ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- list(
+  N  = nrow(kidiq), 
+  y  = kidiq$kid_score, 
+  X  = kidiq$mom_hs
+  )
+
+fit1 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+输出结果
+
+```{r}
+fit1
+```
+
+
+
+检查Traceplot
+
+```{r}
+traceplot(fit)
+```
+
+
+
+
+
+
+## 理解输出结果
+
+
+以上这个模型，给我们提供了什么呢? 它给我们了后验概率分布的样本，包含了我们需要的信息。我们这里用`extract()`提取样本看看
+
+```{r}
+post_samples <- extract(fit)
+```
+
+
+这是一个列表，列表的每个元素包含4000个样本。比如，我们看看mu的样本
+
+```{r}
+post_samples[["mu"]]
+```
+
+```{r}
+hist(post_samples[["mu"]])
+median(post_samples[["mu"]])
+quantile(post_samples[["mu"]], 0.025)
+quantile(post_samples[["mu"]], 0.975)
+```
+
+
+## 可视化
+
+实现后验概率分布可视化，R社区已经有很多好用的宏包，比如 `bayesplot` 和 `tidybayes`，
+我很喜欢`tidybayes`，具体可以参考[tidybayes手册](https://mjskay.github.io/tidybayes/articles/tidybayes.html#introduction)
+
+
+首先，我们先将后验概率样本规整成**长格式**
+
+
+```{r}
+dsamples <- fit %>%
+  gather_draws(mu, sigma) 
+dsamples
+```
+
+
+下面就可以直接使用ggplot2可视化了，这就是`tidybayes`的强大
+
+
+```{r}
+dsamples %>% 
+  filter(.variable == "mu") %>% 
+  ggplot(aes(.value, color = "posterior")) + 
+  geom_density(size = 1) + 
+  xlim(c(70, 100)) + 
+  stat_function(fun = dnorm, 
+        args = list(mean = 80, 
+                    sd = 100), 
+        aes(color = 'prior'), size = 1) +
+  scale_color_manual(name = "", 
+                     values = c("prior" = "red", "posterior" = "black")
+                     ) + 
+  ggtitle("Prior and posterior for mean test scores") + 
+  xlab("score")
+  
+```
+
+### 提问
+
+`mu ~ normal(80, 100)` 这个先验基本没有信息。这里我们使用换一个更具信息量的先验信息，将mu的标准方差设为0.1，重新运行代码，估计的分布发生了变化没？最好也可视化看看。
+
+
+
+## 增加一个预测变量
+
+现在我们看看儿童测试成绩与母亲的教育水平的关联，这需要线性回归
+
+
+$$
+Score = \alpha + \beta X
+$$
+这里母亲完成高中 $X = 1$，否则 $X = 0$. 我们准备数据后，再次运行代码
+
+ 
+```{r}
+stan_program <- "
+data {
+  int<lower=0> N;          // number of kids
+  vector[N] y;             // scores
+  vector[N] X;          
+}
+parameters {
+  real alpha;
+  real beta; 
+  real<lower=0> sigma;
+}
+transformed parameters {
+  vector[N] mu = alpha + X*beta;
+}
+model {
+  //priors
+  alpha ~ normal(80, 100);
+  beta ~ normal(0, 10);
+  sigma ~ normal(0,10);
+  
+  //likelihood
+  y ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- list(
+  N  = nrow(kidiq), 
+  y  = kidiq$kid_score, 
+  X  = kidiq$mom_hs
+  )
+
+fit2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+## 提问
+
+看看模型的系数，对比下`lm()` 的结果
+
+
+```{r}
+summary(fit2)$summary[1:2,]
+
+lm(kid_score ~ 1 + mom_hs, data= kidiq) %>% 
+  summary()
+```
+
+## 后验概率可视化
+
+注意这里的截距alpha对应的是**母亲未完成高中的儿童测试成绩**
+
+
+```{r}
+fit2 %>%
+  spread_draws(alpha, beta, sigma) %>% 
+     mutate(nhs = alpha,               # no high school is just the intercept
+             hs = alpha + beta) %>% 
+  pivot_longer(nhs:hs, names_to = "education", values_to = "estimated_score") %>% 
+  ggplot(aes(y = education, x = estimated_score)) +
+  stat_halfeyeh() + 
+  theme_bw() + 
+  ggtitle("Posterior estimates of scores by education level of mother")
+  
+```
+
+
+
+## 提问
+
+- 增加母亲的IQ值为变量，重新运行代码。最后能解释模型给出的系数？
+**(提示，你可能需要中心化。)**
+
+```{r}
+kidiq_c <- kidiq %>% 
+  mutate(
+    mom_iq = (mom_iq - mean(mom_iq)) /sd(mom_iq)
+  )
+kidiq_c 
+```
+
+- 以上模型的结果，与 `lm()` 结果对比下
+
+```{r}
+lm(kid_score ~ 1 + mom_hs + mom_iq, data= kidiq_c) %>% 
+  summary()
+```
+
+
+注意，为了偷懒，我们stan模型中`beta[1], beta[2], beta[3]`分布对应截距、母亲是否完成高中、母亲IQ值的系数
+```{r}
+stan_program <- "
+data {
+  int<lower=0> N;          // number of kids
+  vector[N] y;             // scores
+  int<lower=0> K;
+  matrix[N, K] X;          
+}
+parameters {
+  vector[K] beta; 
+  real<lower=0> sigma;
+}
+transformed parameters {
+  vector[N] mu = X * beta;
+}
+model {
+  //priors
+  beta ~ normal(0, 10);
+  sigma ~ normal(0,10);
+  
+  //likelihood
+  y ~ normal(mu, sigma);
+}
+"
+
+
+stan_data <- list(
+  N  = nrow(kidiq), 
+  y  = kidiq$kid_score, 
+  K  = 3,
+  X  = model.matrix(~ 1 + mom_hs + mom_iq, data = kidiq_c)
+  )
+
+fit3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+fit3
+```
+
+
+## 预测
+
+对于母亲IQ值为110的儿童，画出测试分数的后验概率
+
+```{r}
+IQ_c <- (110 - mean(kidiq$mom_iq) )/ sd(kidiq$mom_iq)
+IQ_c
+```
+
+```{r}
+post <- fit3 %>%
+  spread_draws( beta[i]) %>% 
+  ungroup() %>% 
+  pivot_wider(
+    names_from = i,
+    values_from = beta,
+    names_glue = "beta_{i}"
+  )
+post
+```
+
+
+```{r}
+post %>% 
+  mutate(
+    score_hs  = beta_1 + beta_2 * 1 + beta_3 * IQ_c,
+    score_nhs = beta_1 + beta_2 * 0 + beta_3 * IQ_c
+    ) %>% 
+  select(starts_with("score_")) %>% 
+  pivot_longer(
+    cols = starts_with("score_"),
+    names_to = "education",
+    values_to = "estimated_score"
+  ) %>% 
+  ggplot(aes(x = estimated_score, y = education, fill = education) ) +
+  ggdist::stat_halfeye(alpha = 0.5)  + 
+  theme_bw() + 
+  ggtitle("Posterior estimates of scores by education level of mother")
+```
+
+
+

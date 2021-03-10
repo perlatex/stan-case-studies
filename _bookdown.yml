@@ -24,5 +24,6 @@ rmd_files: [
   "sleepstudy.Rmd",
   "Homicides.Rmd",
   "SIR_ode.Rmd",
-  "Non_linear.Rmd"
+  "Non_linear.Rmd",
+  "kidiq.Rmd"
 ]

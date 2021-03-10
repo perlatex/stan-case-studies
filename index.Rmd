@@ -73,6 +73,7 @@ knitr::opts_chunk$set(
 - 第 \@ref(sir) 章流行病模型
 - 第 \@ref(nonlinear) 章非线性模型
 - 第 \@ref(Gaussian-processes) 章寻找系外行星
+- 第 \@ref(kidiq) 章儿童智力发育
 
 
 
