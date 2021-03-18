@@ -1,0 +1,127 @@
+# 谋杀事件对选民的影响 {#voters-polarize}
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores()) 
+```
+
+
+
+
+
+## 缘起
+
+Bischof and Wagner (2019)的文章[Do Voters Polarize When Radical Parties Enter Parliament?](https://onlinelibrary.wiley.com/doi/abs/10.1111/ajps.12449)的
+数据放[American Journal of Political Science Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/DZ1NFG)
+
+我们现在重复他们 Table 1, Model 4
+
+
+> 原文的分析使用普通最小二乘估计来衡量2002年荷兰议会选举前民粹主义激进右翼政治家皮姆·福图因(被暗杀)对微观意识形态(两极分化)的影响。为此，文章研究分析了2002年荷兰议会选举研究选前浪潮中1551名受访者。结果变量包含受访者(左右自我定位)与所有受访者选前(自我定位中位数)的平方距离。主要的预测因素是一个二元指标，即采访是在福图因遇刺之前还是之后进行的。
+
+
+原文报道了点估计结果：截距1.644 (0.036)，斜率 -0.112 (0.076) ，括号里是（标准误）
+
+
+
+## 数据读取
+
+```{r}
+## Retrieve and manage data
+df <-
+	read.table("./data/3_Netherlands2002.tab",
+		header = TRUE,
+		stringsAsFactors = FALSE,
+		sep = "\t",
+		fill = TRUE
+	) %>% 
+	select(wave, fortuyn, polarization) %>% ### select relevant variables
+	subset(wave == 1) %>%                   ### subset to pre-election wave
+	na.omit()                               ### drop incomplete rows
+
+df
+```
+
+
+
+
+
+## stan模型
+
+我们这里使用贝叶斯模型
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+//
+// This Stan program defines a simple model, with a
+// vector of values y modeled as normally distributed
+// with mean mu and standard deviation sigma.
+//
+// Learn more about model development with Stan at:
+//
+//    http://mc-stan.org/users/interfaces/rstan.html
+//    https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+//
+
+functions {
+  vector pw_norm(vector y, vector mu, real sigma) {
+    return -0.5 * (log(2 * pi() * square(sigma)) + 
+                     square((y - mu) / sigma));
+  }
+}
+
+
+data {
+  int<lower=1> N;             
+  int<lower=1> K;             
+  matrix[N, K] x;               
+  vector[N] y;                 
+}
+
+parameters {
+  vector[K] beta;      
+  real<lower=0> sigma; 
+}
+
+
+transformed parameters {
+  vector[N] mu;  
+  mu = x * beta; 
+}
+
+model {
+  // priors
+  beta ~ normal(0, 10);  
+  sigma ~ cauchy(0, 5);  
+  
+  // log-likelihood
+  target += normal_lpdf(y | mu, sigma);
+}
+
+'
+
+
+stan_data <- df %>%
+  tidybayes::compose_data(
+   N = nrow(.),
+   y = polarization,
+   K = 2,
+   x = model.matrix(~ 1 + fortuyn, data = .)
+  )
+
+mod <- stan(model_code = stan_program, data = stan_data,            
+				    pars = c("beta", "sigma")
+				    )
+```
+
+
+
+
+```{r}
+print(mod, pars = c("beta", "sigma"), digits_summary = 3L)
+```
+
+
+

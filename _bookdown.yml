@@ -25,5 +25,7 @@ rmd_files: [
   "Homicides.Rmd",
   "SIR_ode.Rmd",
   "Non_linear.Rmd",
-  "kidiq.Rmd"
+  "kidiq.Rmd",
+  "Voters_Polarize.Rmd",
+  "weighted_lm.Rmd"
 ]

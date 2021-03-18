@@ -1,0 +1,193 @@
+# 有权重的概率密度函数 {#weighted}
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores()) 
+```
+
+
+## Probability density function
+
+<https://mc-stan.org/docs/2_26/functions-reference/normal-distribution.html>
+
+$$
+\text{Normal}(y|\mu,\sigma) = \frac{1}{\sqrt{2 \pi} \
+\sigma} \exp\left( - \, \frac{1}{2}            \left(  \frac{y -
+\mu}{\sigma} \right)^2     \right) 
+$$
+
+
+
+## normal_lpdf
+
+$$
+\begin{align}
+\mathtt{normal\_lpdf(y | mu, sigma)} &= \log \frac{1}{\sqrt{2 \pi}\sigma} 
+       - \frac{1}{2} \left( \frac{y -\mu}{\sigma} \right)^2  \\
+       & =  - \frac{1}{2} \log (2 \pi \sigma^2) - \frac{1}{2} \left( \frac{y -\mu}{\sigma} \right)^2  \\
+       & = - \frac{1}{2} \Big[\log (2 \pi \sigma^2) + \left( \frac{y -\mu}{\sigma} \right)^2 \Big] \\
+\end{align}
+$$
+
+
+
+## stan code for normal_lpdf
+
+```{stan}
+functions {
+   vector pw_norm(vector y, vector mu, real sigma) {
+     return -0.5 * ( log(2 * pi() * square(sigma)) + square((y - mu) / sigma)  );
+  }
+}
+```
+
+
+
+
+## 带有权重的normal_lpdf
+
+为了加入权重，我们需要在`normal_lpdf`累加前给`likelihood`赋予**权重**，具体来说，这里有一个长度为N的向量包含着`normal_lpdf`值，然后乘以相同长度的权重向量。
+
+
+
+```{stan}
+functions {
+   vector pw_norm(vector y, vector mu, real sigma) {
+     return -0.5 * ( log(2 * pi() * square(sigma)) + square((y - mu) / sigma)  );
+  }
+}
+
+
+model {
+
+  // log-likelihood
+  // target += normal_lpdf(y | mu, sigma);
+  
+  // weighted log-likelihood
+  target += dot_product(weights, pw_norm(y, mu, sigma));
+}
+```
+
+
+
+
+## 数据模拟
+
+```{r}
+set.seed(20190417)
+N.sim <- 10000L                               ### num. observations
+K.sim <- 5L                                   ### num. predictors
+x.sim <- cbind(                               ### model matrix
+	rep(1, N.sim), 
+	matrix(rnorm(N.sim * (K.sim - 1)), N.sim, (K.sim - 1))
+)
+beta.sim <- rnorm(K.sim, 0, 10)               ### coef. vector
+sigma.sim <- abs(rcauchy(1, 0, 5))            ### scale parameter
+mu.sim <- x.sim %*% beta.sim                  ### linear prediction
+y.sim <- rnorm(N.sim, mu.sim, sigma.sim)      ### simulated outcome
+
+weights <- sample(c(0,1), N.sim, replace = TRUE)
+
+
+stan_data <- list(
+	N = N.sim,
+	K = K.sim,
+	x = x.sim,
+	y = y.sim,
+	weights = weights
+)
+```
+
+
+
+
+## stan模型
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+//
+// This Stan program defines a simple model, with a
+// vector of values y modeled as normally distributed
+// with mean mu and standard deviation sigma.
+//
+// Learn more about model development with Stan at:
+//
+//    http://mc-stan.org/users/interfaces/rstan.html
+//    https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+//
+
+functions {
+  vector pw_norm(vector y, vector mu, real sigma) {
+    return -0.5 * (log(2 * pi() * square(sigma)) + 
+                     square((y - mu) / sigma));
+  }
+}
+
+
+data {
+  int<lower=1> N;               // num. observations
+  int<lower=1> K;               // num. predictors
+  matrix[N, K] x;               // model matrix
+  vector[N] y;                  // outcome vector
+  vector<lower=0>[N] weights;   // weights
+}
+
+parameters {
+  vector[K] beta;      // coef vector
+  real<lower=0> sigma; // scale parameter
+}
+
+
+transformed parameters {
+  vector[N] mu;  // declare
+  mu = x * beta; // assign
+}
+
+model {
+  // priors
+  beta ~ normal(0, 10);  // priors for beta
+  sigma ~ cauchy(0, 5);  // prior for sigma
+  
+  // log-likelihood
+  //target += normal_lpdf(y | mu, sigma);
+  
+  // weighted log-likelihood
+  target += dot_product(weights, pw_norm(y, mu, sigma));
+}
+
+'
+
+
+mod <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+## 看恢复的如何
+
+
+```{r}
+print(mod, pars = c("beta", "sigma"))
+```
+
+
+```{r}
+true.pars <- c(beta.sim, sigma.sim)
+names(true.pars) <- c(paste0("beta[", 1:5, "]"), "sigma")
+round(true.pars, 2L)
+```
+
+
+
+
+
+
+
+
+## 参考
+
+- <https://www.mzes.uni-mannheim.de/socialsciencedatalab/article/applied-bayesian-statistics/>
+
+
