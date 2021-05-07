@@ -1,0 +1,335 @@
+# 贝叶斯元分析 {#meta}
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+## 以前的随机对照试验
+
+数据来源 [Gøtzsche et al.](https://test.qmplus.qmul.ac.uk/pluginfile.php/154534/mod_book/chapter/3137/G%C3%B8tzsche%202009.pdf). 
+
+
+```{r}
+rct <- read_rds("./rawdata/rct.rds")
+rct
+```
+
+
+- 编号1，代表 treatment (group 1) is screening with mammography(钼靶筛查)  
+- 编号0，代表 control (group 0) is no screening. 
+- study 每一个独立的研究
+- $j$ 对应study的编号
+- $d_{1j}$ treatment group 乳腺癌死亡人数
+- $d_{0j}$ control group   乳腺癌死亡人数
+- $n_{1j}$ treatment group 乳腺癌患病人数
+- $n_{0j}$ control group   乳腺癌患病人数
+
+
+
+
+
+这里关注的指标是相对风险率(relative risk ratio)，具体计算如下
+$$
+\begin{aligned}
+p_{1j} &= d_{1j}/n_{1j}\\
+p_{0j} &= d_{0j}/n_{0j} \\
+\text{relative risk ratio} &= p_{1j}/p_{0j} \\
+\end{aligned}
+$$
+
+
+我们把 $p_{1j}$ 和 $p_{0j}$ 看作样本比例，使用[delta method](https://en.wikipedia.org/wiki/Delta_method)，计算relative risk ratio的方差，
+
+
+
+$$
+\begin{aligned}
+\sigma^2_j &\approx \frac{1 - p_{1j}}{n_{1j}p_{1j}} + \frac{1 - p_{0j}}{n_{0j}p_{0j}}.  \\
+\end{aligned}
+$$
+
+最后，原始数据整理如下
+
+```{r}
+df <- rct %>%
+  mutate(
+    p1 = d1 / n1,
+    p0 = d0 / n0,
+    rr = p1 / p0,
+  ) %>%
+  mutate(
+    lrr = log(rr),
+    lse = sqrt((1 - p1) / (p1 * n1) + (1 - p0) / (p0 * n0)),
+    lower = exp(lrr - qnorm(.975) * lse),
+    upper = exp(lrr + qnorm(.975) * lse)
+  )
+
+df
+```
+
+## Hiearchical Model
+
+数据每行对应一个独立的研究，因此可以用**贝叶斯层级模型**来模拟。这里的y变量(relative risk)的对数，接近正态分布，同时假定这里的随机效应项$\theta_j$服从正态分布
+
+
+$$
+\begin{aligned}
+y_j &\sim N(\theta_j, \sigma^2_j)  \\
+\theta_j &\sim N(\mu, \tau),
+\end{aligned}
+$$
+这里假定 $\sigma^2_j$ 已知，也就说是确定性的，这种假设是合理的，因为样本量较大，每个研究的方差（Variance of the Binomial Distribution）是可以精确估计的。
+
+> 元分析关注的是整体的均值$\mu$
+
+
+There are, in general, three ways to estimate the random effects, $\theta_j$.
+
+* *No-pooling:* there is a separate model for each study and $\theta_j=y_j$. This is a special case of the hierarchical model in which $\tau = \infty$.
+
+* *Complete-pooling:* patients in each study are random samples from a common distribution so $\theta_j = \mu$. This is a special case of the hierarchical model in with $\tau = 0$.
+
+* *Partial-pooling:* the hierarchical model is a compromise between the no-pooling and the complete-pooling estimates. In this case $\tau$ is unknown and $\theta_j$ is closer to $\mu$ when $\tau$ is small relative to $\sigma^2_j$, and closer to $y_j$ when the reverse is true.
+
+
+
+
+### stan代码
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=1> N;           
+  vector[N] y;              
+  vector<lower=0>[N] sigma;   
+}
+
+parameters {
+  real theta[N];          
+  real mu;          
+  real<lower=0> tau; 
+}
+model {
+
+  for (i in 1:N) {
+    target += normal_lpdf(y[i] | theta[i], sigma[i]);
+  }
+  
+  theta ~ normal(mu, tau);
+  mu ~ normal(0, 1);
+  tau ~ cauchy(0, 1);
+
+}
+"
+
+
+stan_data <- list(N = nrow(df), 
+                  y = df$lrr, 
+                  sigma = df$lse
+                  )
+
+
+fit_stan <- stan(model_code = stan_program, 
+                  data = stan_data,
+                  iter = 4000,
+                  warmup = 1000
+                  )
+```
+
+
+```{r}
+fit_stan %>% 
+  tidybayes::gather_draws(mu, tau) %>% 
+  tidybayes::mean_qi()
+```
+
+
+
+
+### 非中心化参数的办法
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=0> N;             // number of trials 
+  real y[N];                  // estimated log relative risk
+  real<lower=0> sigma[N];     // se of log relative risk
+}
+parameters {
+  real mu; 
+  real<lower=0> tau;
+  real eta[N];
+}
+transformed parameters {
+  real theta[N];
+  for (i in 1:N)
+    theta[i] = mu + tau * eta[i];
+}
+model {
+  eta ~ normal(0, 1);
+  y ~ normal(theta, sigma);
+}
+"
+
+stan_data <- list(N = nrow(df), 
+                  y = df$lrr, 
+                  sigma = df$lse
+                  )
+
+
+fit_stan2 <- stan(model_code = stan_program, 
+                  data = stan_data,
+                  iter = 4000,
+                  warmup = 1000
+                  )
+```
+
+
+```{r}
+fit_stan2 %>% 
+  tidybayes::gather_draws(mu, tau) %>% 
+  tidybayes::mean_qi()
+```
+
+
+随机效应 $\theta_j$ 会朝着$\mu$ 的方向收缩。下图画出了每个独立研究的**置信区间**和贝叶斯模型估计的**可信赖区间**
+
+
+
+```{r}
+raw_data <- df %>% 
+  mutate(
+    item = 'Relative risk',
+    study_year = str_c(study, year, sep = ", ")
+  ) %>% 
+  select(
+    study_year, item, .value = rr,  .lower = lower, .upper = upper
+  ) %>% 
+  mutate(study_year = fct_inorder(study_year)) 
+raw_data
+```
+
+
+```{r}
+post_data <- fit_stan2 %>% 
+  tidybayes::gather_draws(theta[i])  %>% 
+  tidybayes::mean_qi(.width = .95) %>% 
+  ungroup() 
+```
+
+
+
+```{r}
+post_data <- fit_stan2 %>% 
+  tidybayes::gather_draws(theta[i])  %>% 
+  mutate(.value = exp(.value)) %>% 
+  tidybayes::mean_qi(.width = .95) %>% 
+  ungroup() %>% 
+  bind_cols(
+    df %>% 
+      mutate(
+        study_year = str_c(study, year, sep = ", ") 
+      ) %>% 
+      select(study_year)
+  ) %>% 
+  mutate(
+    item = 'Random effect'
+  ) %>% 
+  select(study_year, item, .value, .lower, .upper) %>% 
+  mutate(study_year = fct_inorder(study_year)) 
+
+post_data
+```
+
+```{r}
+tb <- post_data %>% 
+  bind_rows(raw_data)
+tb
+```
+
+
+```{r}
+intercept <- fit_stan2 %>% 
+  tidybayes::gather_draws(mu) %>% 
+  mutate(.value = exp(.value)) %>% 
+  tidybayes::mean_qi() %>% 
+  pull(.value)
+
+intercept
+```
+
+```{r}
+tb %>% 
+  ggplot(aes(x = .value, y = fct_rev(study_year), xmin = .lower, xmax = .upper)) +  
+  geom_pointrange(
+    aes(color = item),
+    position = position_dodge(width = 0.50)
+  ) +
+  geom_vline(xintercept = intercept)
+```
+
+可以看到，红色的点相比与蓝色的点，往中间整体均值方向收缩(shrinkage)。不确定性越大，收缩的幅度越大。每一个研究中，贝叶斯可信赖区间要比频率学的置信区间要窄(narrower)，这是因为层级模型中，彼此会共享信息。
+
+
+除了我们最关注的整体均值外，我们还可以预测新的研究中的$\tilde{\theta}_j$。方法很简单，就是用$\mu$ 和 $\tau$ 的后验分布模拟$\tilde{\theta_j}$，
+
+$$
+\tilde{\theta}_j \sim N(\mu, \tau)
+$$
+在stan里，这样写
+```{stan}
+generated quantities {
+   real theta_hat;
+   theta_hat = normal_rng(mu, tau);
+}
+```
+
+
+
+在R里模拟也可以
+
+```{r}
+n.sims <- nrow(post$mu)
+theta.new <- rep(NA, n.sims)
+for (i in 1:n.sims){ 
+  theta.new[i]  <- rnorm(1,  post$mu[i],  post$tau[i]) 
+}
+```
+
+
+
+
+
+
+
+## 用brms重复
+
+```{r}
+library(brms)
+fit_brms <- 
+  brm(data = df, 
+      family = gaussian,
+      lrr | se(lse) ~ 1 + (1 | study),
+      prior = c(prior(normal(0, 1), class = Intercept),
+                prior(cauchy(0, 1), class = sd)),
+      iter = 4000, warmup = 1000, cores = 4, chains = 4)
+```
+
+
+```{r}
+fit_brms
+```
+
+
+
+## 参考
+
+- <https://devinincerti.com/2015/10/31/bayesian-meta-analysis.html>

@@ -76,6 +76,7 @@ knitr::opts_chunk$set(
 - 第 \@ref(kidiq) 章儿童智力发育
 - 第 \@ref(voters-polarize) 章谋杀事件对选民的影响
 - 第 \@ref(weighted) 章有权重的概率密度函数
+- 第 \@ref(meta) 章元分析
 
 
 
