@@ -1,0 +1,644 @@
+# 可视化贝叶斯工作流程 {#Vis-Bayesian-Workflow}
+
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+## 数据
+
+```{r}
+births <- readr::read_rds(here::here("rawdata", "births_2017_sample.RDS"))
+births  
+```
+
+数据包括了若干变量：
+
+- `mager` 母亲的年龄
+- `mracehisp` 母亲的种族
+   - 1 Non-Hispanic White (only)
+   - 2 Non-Hispanic Black (only)
+   - 3 Non-Hispanic AIAN (only)
+   - 4 Non-Hispanic Asian (only)
+   - 5 Non-Hispanic NHOPI (only)
+   - 6 Non-Hispanic more than one race
+   - 7 Hispanic
+   - 8 Origin unknown or not stated
+
+- `meduc` 母亲的教育层次
+   - 1 8th grade or less
+   - 2 9th through 12th grade with no diploma
+   - 3 High school graduate or GED completed
+   - 4 Some college credit, but not a degree.
+   - 5 Associate degree (AA,AS)
+   - 6 Bachelor’s degree (BA, AB, BS)
+   - 7 Master’s degree (MA, MS, MEng, MEd, MSW, MBA)
+   - 8 Doctorate (PhD, EdD) or Professional Degree (MD, DDS, DVM, LLB, JD)
+   - 9 Unknown
+- `bmi` 母亲的身高体重比 
+- `sex` 婴儿性别
+- `combgest` 孕周
+- `dbwt` 出生体重（kg）
+
+
+## 简单探索和数据准备
+
+这里为了简化，我们只关注婴儿孕周和出生体重，同时构建一个新变量 `preterm`，是否早产（孕周是否满32周）
+
+
+
+```{r}
+df <- births %>% 
+  rename(birthweight = dbwt, gest = combgest) %>% 
+  mutate(preterm = if_else(gest < 32, "Y", "N")) 
+df
+```
+
+
+
+```{r}
+df %>%
+  ggplot(aes(x = birthweight)) +
+  geom_density()
+```
+
+
+
+胎龄的对数和体重的对数之间的关联
+
+
+```{r}
+df %>% 
+  ggplot(aes(log(gest), log(birthweight))) + 
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) +
+  ggtitle("birthweight v gestational age")
+```
+
+
+
+```{r}
+df %>% 
+  ggplot(aes(log(gest), log(birthweight), color = preterm)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) + 
+  ggtitle("birthweight v gestational age")
+```
+
+## 建模
+
+### 模型1
+
+建立**体重对数**与**孕周对数**之间线性模型
+
+
+$$
+\begin{align*}
+\text{y}_i & \sim \operatorname{Normal}(\mu_i, \sigma) \\
+\mu_i         & = \beta_0 + \beta_1\log(x_i) \\
+\beta_i       & \sim \operatorname{Normal}(0, 1) \\
+\sigma       & \sim \operatorname{Normal}(0, 1)  \\
+\end{align*}
+$$
+
+- $y_i$ 出生体重
+- $x_i$ 孕周
+- $z_i$ 是否早产
+
+
+
+### 模型2 
+
+在模型1的基础上，增加了孕周和是否早产之间的相互项
+
+
+$$
+\begin{align*}
+\text{y}_i & \sim \operatorname{Normal}(\mu_i, \sigma) \\
+\mu_i         & = \beta_0 + \beta_1\log(x_i) + \beta_3 z_i + \beta_4\log(x_i) z_i \\
+\beta_i       & \sim \operatorname{Normal}(0, 1) \\
+\sigma        & \sim \operatorname{Normal}(0, 1)  \\
+\end{align*}
+$$
+
+
+## 先验预测检验
+
+先不看响应变量，而是先假定斜率系数($\beta$ and $\sigma$)服从某个分布（即先验概率分布），乘以预测变量（比如这里的孕周），然后根据模型似然函数公式计算（模拟）相应的响应变量（出生体重），结果应该是一个分布。那么，就检查**这个模拟的y变量分布**是否**包含**了真实的响应变量y，从而说明我们假定的先验概率分布是否合理。
+
+### 无信息的先验分布
+
+模拟了100组系数，那么对应的是100列模拟的y
+
+```{r}
+set.seed(182)
+nsims <- 100
+sigma <- 1 / sqrt(rgamma(nsims, 1, rate = 100))
+beta0 <- rnorm(nsims, 0, 100)
+beta1 <- rnorm(nsims, 0, 100)
+
+dsims <- tibble(log_gest_c = (log(ds$gest)-mean(log(ds$gest)))/sd(log(ds$gest)))
+
+for(i in 1:nsims){
+  this_mu <- beta0[i] + beta1[i]*dsims$log_gest_c 
+  dsims[paste0(i)] <- this_mu + rnorm(nrow(dsims), 0, sigma[i])
+}
+```
+
+
+```{r}
+dsl <- dsims %>% 
+  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+
+dsl %>% 
+  ggplot(aes(sim_weight)) + 
+  geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
+  xlim(c(-1000, 1000)) + 
+  geom_vline(xintercept = log(60), color = "purple", lwd = 1.2, lty = 2) + 
+  theme_bw(base_size = 16) + 
+  annotate("text", x=300, y=0.0022, label= "Monica's\ncurrent weight", 
+           color = "purple", size = 5) 
+```
+
+模拟的是胎儿的体重，但紫色是作者成年人的体重。正常情况下，婴儿的体重不大可能如此大概率的出现成人体重。
+
+说明此时假定的系数的先验分布，是不太好的。
+
+
+
+### 弱信息的先验分布
+
+ 
+如何设定先验分布，可参考[weakly informative priors](https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations)
+
+
+```{r, warning=FALSE}
+sigma <- abs(rnorm(nsims, 0, 1))
+beta0 <- rnorm(nsims, 0, 1)
+beta1 <- rnorm(nsims, 0, 1)
+
+dsims <- tibble(log_gest_c = (log(ds$gest)-mean(log(ds$gest)))/sd(log(ds$gest)))
+
+for(i in 1:nsims){
+  this_mu <- beta0[i] + beta1[i]*dsims$log_gest_c 
+  dsims[paste0(i)] <- this_mu + rnorm(nrow(dsims), 0, sigma[i])
+}
+
+dsl <- dsims %>% 
+  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+
+dsl %>% 
+  ggplot(aes(sim_weight)) + 
+  geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
+  geom_vline(xintercept = log(60), color = "purple", lwd = 1.2, lty = 2) + 
+  theme_bw(base_size = 16) + 
+  annotate("text", x=7, y=0.2, label= "Monica's\ncurrent weight", color = "purple", size = 5)
+```
+
+
+成年人的体重，这次远离高概率区间，这是符合常理的。文章说的很好：任何可能性都会一定概率出现。
+
+>  Remember that these are the distributions before we look at any data, and we are doing so just to make sure that any plausible values have some probability of showing up.
+
+
+所以，这里**弱先验**是不错的选择。
+
+
+
+## Stan
+
+导入Stan之前，先预处理数据
+
+```{r}
+dt <- df %>% 
+  mutate(preterm = if_else(preterm == "Y", 1, 0)) %>%
+  mutate(
+    across(c(birthweight, gest), log, .names = "log_{.col}")
+  ) %>%
+  mutate(
+    log_gest_c = (log_gest - mean(log_gest))/sd(log_gest)
+  )
+dt
+```
+
+
+
+### 模型1：线性模型
+
+
+```{r}
+stan_program <- "
+data {
+  int<lower=1> N;       
+  vector[N] log_gest;    
+  vector[N] log_weight;    
+}
+parameters {
+  vector[2] beta;           
+  real<lower=0> sigma;  
+}
+model {
+  target += normal_lpdf(log_weight | beta[1] + beta[2] * log_gest, sigma);
+
+  target += normal_lpdf(sigma | 0, 1);
+  target += normal_lpdf(beta | 0, 1);
+}
+generated quantities {
+  vector[N] log_lik;        
+  vector[N] log_weight_rep; 
+
+  for (n in 1:N) {
+    real log_weight_hat_n = beta[1] + beta[2] * log_gest[n];
+    log_lik[n] = normal_lpdf(log_weight[n] | log_weight_hat_n, sigma);
+    log_weight_rep[n] = normal_rng(log_weight_hat_n, sigma);
+  }
+}
+
+"
+
+
+
+
+# put into a list
+stan_data <- list(N          = nrow(dt),
+                  log_weight = dt$log_birthweight,
+                  log_gest   = dt$log_gest_c, 
+                  preterm    = dt$preterm)
+
+
+mod1 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+# summary(mod1)[["summary"]][c("beta[1]", "beta[2]", "sigma"), ]
+mod1 %>% 
+  tidybayes::gather_draws(beta[i], sigma) %>% 
+  tidybayes::mean_qi()
+```
+
+
+
+这里孕周gestation是标准化过的，所以对系数可以解释为，孕周每增加一个标准差，婴儿会有0.14体重的增长。
+
+
+### 模型2：增加交互项
+
+```{r}
+stan_program <- "
+data {
+  int<lower=1> N;       
+  vector[N] log_gest;    
+  vector[N] log_weight;      
+  vector[N] preterm;      
+}
+transformed data {
+  vector[N] inter;           // interaction
+  inter     = log_gest .* preterm;
+}
+parameters {
+  vector[4] beta;           
+  real<lower=0> sigma;  
+}
+model {
+  // Log-likelihood
+   log_weight ~ normal(beta[1] + beta[2]*log_gest + beta[3]*preterm + beta[4]*inter, sigma);
+
+  // Log-priors
+  target += normal_lpdf(sigma | 0, 1);
+  target += normal_lpdf(beta | 0, 1);
+}
+generated quantities {
+  vector[N] log_lik;        // pointwise log-likelihood for LOO
+  vector[N] log_weight_rep; // replications from posterior predictive dist
+
+  for (n in 1:N) {
+    real log_weight_hat_n = beta[1] + beta[2]*log_gest[n] + beta[3]*preterm[n] + beta[4]*inter[n];
+    log_lik[n] = normal_lpdf(log_weight[n] | log_weight_hat_n, sigma);
+    log_weight_rep[n] = normal_rng(log_weight_hat_n, sigma);
+  }
+}
+
+"
+
+
+stan_data <- list(N          = nrow(dt),
+                  log_weight = dt$log_birthweight,
+                  log_gest   = dt$log_gest_c, 
+                  preterm    = dt$preterm)
+
+
+
+mod2 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+# summary(mod2)[["summary"]][c(paste0("beta[",1:4, "]"), "sigma"),]
+mod2 %>% 
+  tidybayes::gather_draws(beta[i], sigma) %>% 
+  tidybayes::mean_qi()
+```
+
+
+
+模型2公式
+$$
+出生体重 = \beta_1 + \beta_2胎龄 + \beta_3 是否早产 + \beta_4 胎龄*是否早产 
+$$
+可以改写为：
+$$
+\begin{align*}
+出生体重(早产) &= \beta_1 + \beta_2胎龄 + \beta_3 *1 + \beta_4 胎龄*1 \\
+               &= (\beta_1 +\beta_3) + (\beta_2+ \beta_4) 胎龄 \\
+出生体重(正常) &= \beta_1 + \beta_2胎龄 
+\end{align*}
+$$
+
+> 早产和自然出生两种情形，对应不同的截距和系数，相当于分层模型
+
+
+
+
+
+
+### 模型3：用多层模型试试
+
+
+$$
+\begin{align*}
+\text{y}_i & \sim \operatorname{Normal}(\mu_i, \sigma) \\
+\mu_i         & = \alpha_{\text{premature}[i]} + \beta_{\text{premature}[i]} \times x_i \\
+\alpha       & \sim \operatorname{Normal}(0, 1) \\
+\beta       & \sim \operatorname{Normal}(0, 1) \\
+\sigma        & \sim \operatorname{Normal}(0, 1)  \\
+\end{align*}
+$$
+
+
+和上面数据不同的是，在stan分层模型里，preterm变量扮演**分组的角色**，所以需要将其转换成整数类型的 1，2， 那么此时2对应早产，1对应自然出生的情形。数据准备工作需要重新调整
+
+```{r}
+tb <- df %>% 
+  mutate(preterm = if_else(preterm == "Y", 2, 1)) %>%
+  mutate(
+    across(c(birthweight, gest), log, .names = "log_{.col}")
+  ) %>%
+  mutate(
+    log_gest_c = (log_gest - mean(log_gest))/sd(log_gest)
+  )
+tb
+```
+
+
+```{r}
+stan_program <- "
+data {
+  int<lower=1> N;       
+  vector[N] log_gest;    
+  vector[N] log_weight;      
+  int J;                                  // number of groups, 2
+  int<lower = 1, upper = J> preterm[N];   // index  of groups, 1 or 2   
+}
+
+parameters {
+  real alpha[J];           
+  real beta[J];           
+  real<lower=0> sigma;  
+}
+model {
+  vector[N] mu;
+  for(i in 1:N) {
+    mu[i] = alpha[preterm[i]] + beta[preterm[i]] *log_gest[i];
+  }
+  
+  log_weight ~ normal(mu, sigma);
+  
+  alpha ~ std_normal();
+  beta ~ std_normal();
+  sigma ~ std_normal();
+}
+generated quantities {
+  vector[N] log_lik;        // pointwise log-likelihood for LOO
+  vector[N] log_weight_rep; // replications from posterior predictive dist
+
+  for (n in 1:N) {
+    real mu_n = alpha[preterm[n]] + beta[preterm[n]] *log_gest[n];
+    log_lik[n] = normal_lpdf(log_weight[n] | mu_n, sigma);
+    log_weight_rep[n] = normal_rng(mu_n, sigma);
+  }
+}
+
+"
+
+
+stan_data <- list(N          = nrow(tb),
+                  log_weight = tb$log_birthweight,
+                  log_gest   = tb$log_gest_c, 
+                  J          = length(unique(tb$preterm)),
+                  preterm    = tb$preterm)
+
+
+
+mod3 <- stan(model_code = stan_program, data = stan_data)
+```
+
+```{r}
+# summary(mod3)[["summary"]][c(paste0("beta[",1:4, "]"), "sigma"),]
+mod3 %>% 
+  tidybayes::gather_draws(alpha[i], beta[i], sigma) %>% 
+  tidybayes::mean_qi()
+```
+
+mod2的系数组合后，结果与mod3是一样的
+
+
+
+
+## 后验预测检查
+
+后验预测检查，预测就是，模型根据参数的后验概率分布，**重复**响应变量（样本）。然后比较**模型预测的数据(样本)** 和 **原始数据**是否符合的好。
+
+如果模型拟合的好，**模型重复出的样本**能够很好的模仿出**原始数据**。
+
+
+### 后验预测分布检查
+
+对应Stan模型，我们从"log_weight_rep"的后验预测分布中提取样本，然后与真实数据对比
+
+```{r}
+library(bayesplot)
+set.seed(1856)
+y <- dt$log_birthweight
+yrep1 <- extract(mod1)[["log_weight_rep"]]
+samp100 <- sample(nrow(yrep1), 100)
+ppc_dens_overlay(y, yrep1[samp100, ])  
+```
+
+Model 2 要好点:
+
+```{r}
+y <- dt$log_birthweight
+yrep2 <- extract(mod2)[["log_weight_rep"]]
+samp100 <- sample(nrow(yrep2), 100)
+ppc_dens_overlay(y, yrep2[samp100, ])  
+```
+
+```{r}
+y <- dt$log_birthweight
+yrep3 <- extract(mod3)[["log_weight_rep"]]
+samp100 <- sample(nrow(yrep3), 100)
+ppc_dens_overlay(y, yrep3[samp100, ])  
+```
+
+### 后验预测统计量检查
+
+后验预测样本，就是上图的每一条蓝色的线(each replicated dataset)。
+统计量检查，计算后验预测样本的统计量，然后与原始响应变量的统计量，对比。
+
+
+这个和后验概率检查一样，
+
+```{r}
+library(bayesplot)
+y <- dt$log_birthweight
+yrep1 <- extract(mod1)[["log_weight_rep"]]
+ppc_stat(y, yrep1, stat = 'median')
+```
+预测的中位数太低，与实际值相差很大。
+
+
+
+```{r}
+library(bayesplot)
+y <- dt$log_birthweight
+yrep2 <- extract(mod2)[["log_weight_rep"]]
+ppc_stat(y, yrep2, stat = 'median')
+```
+模型2也不是很好.
+
+
+
+当然，我们也可以统计出生体重小于2.5kg比例
+```{r}
+library(bayesplot)
+y <- dt$log_birthweight
+yrep1 <- extract(mod1)[["log_weight_rep"]]
+ppc_stat(y, yrep1, 
+         stat = function(.x) mean(.x < log(2.5))
+         )
+```
+
+
+
+```{r}
+library(bayesplot)
+y <- dt$log_birthweight
+yrep2 <- extract(mod2)[["log_weight_rep"]]
+ppc_stat(y, yrep2, 
+         stat = function(.x) mean(.x < log(2.5))
+         )
+```
+
+模型2 似乎要好点。
+
+
+## LOO-CV
+
+先拿一个出来，比如$i$, 让其余的N-1个拟合模型，然后预测$i$，看对这个点预测精度如何。
+这样把每个点都遍历一次，并求和，即$\text{elpd}_{LOO}$， 这个值越大，预测越好。
+
+因此，可以用这种方法进行多个模型比较，从中选择$\text{elpd}_{LOO}$大的模型
+
+可以使用`loo`宏包计算$\text{elpd}_{LOO}$
+
+
+
+### LOO-CV with Stan output
+
+对应 Stan 模型，我们需要提取log-likelihood, 对应的就是模型generated quantities中的"log_lik"，然后运行 `loo`. (The `save_psis = TRUE` is needed for the LOO-PIT graphs below).
+
+```{r}
+loglik1 <- extract(mod1)[["log_lik"]]
+loglik2 <- extract(mod2)[["log_lik"]]
+loo1 <- loo(loglik1, save_psis = TRUE)
+loo2 <- loo(loglik2, save_psis = TRUE)
+```
+
+We can look at the summaries of these and also compare across models. The $\text{elpd}_{LOO}$ is higher for Model 2, so it is preferred. 
+
+```{r}
+loo1
+loo2
+compare(loo1, loo2)
+```
+输出中包含了 Pareto k 估计值，这个值可以很好的说明每个点的影响力，$k$ 值越大，影响力越大，但是$k$如果超过0.7也不是很好[Values of $k$ over 0.7 are not good](https://mc-stan.org/loo/reference/pareto-k-diagnostic.html)，说明模型需要重新考虑。$k$值大小可以从的`loo`函数返回的对象中提取。
+
+
+```{r}
+head(loo1$diagnostics$pareto_k)
+```
+
+or plotted easily like this:
+
+```{r}
+plot(loo1)
+```
+
+### LOO-PIT
+
+另一种模型诊断是[probability integral transform](https://en.wikipedia.org/wiki/Probability_integral_transform) (PIT)， 就是看
+每个点是否落入预测分布$p(y_i|\boldsymbol{y_{-i}})$.  如果模型很好的标定，那么应该看起来想Uniform distributions。这里我们可以用`bayesplot` 画出100个标准的Uniforms分布，结果看起来并不差。
+
+
+```{r}
+ppc_loo_pit_overlay(yrep = yrep1, y = y, lw = weights(loo1$psis_object)) + ggtitle("LOO-PIT Model 1")
+ppc_loo_pit_overlay(yrep = yrep2, y = y, lw = weights(loo2$psis_object)) + ggtitle("LOO-PIT Model 2")
+
+```
+
+
+
+```{r, include = F}
+lw = weights(loo1$psis_object)
+dim(lw)
+
+# X is posterior distribution
+# Y is F(x)
+# want to calculate the CDF of Y
+# weights are probability mass on the log scale. 
+# 
+
+pit_man <- c()
+for(i in 1:length(y)){
+  pit_man <- c(pit_man, sum(exp(lw[yrep1[,i] <=y[i],i])))
+}
+
+plot(density(pit_man))
+
+```
+
+
+
+## Summary
+
+总之，可视化是贝叶斯模型假设和诊断中一个非常强大的工具。对应贝叶斯模型，即使我们没看到数据，我们也应该去思考先验与似然的相互作用，去了解新预测的数据与观测数据的一致性，以及模型在样本外的表现。
+
+
+## 参考
+
+- <https://www.monicaalexander.com/posts/2020-28-02-bayes_viz/>
+
+
