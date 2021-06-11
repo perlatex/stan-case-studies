@@ -1,0 +1,252 @@
+# 有序回归模型 {#ordinary}
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+## 数据
+
+数据来源<https://stats.idre.ucla.edu/r/dae/ordinal-logistic-regression/>
+
+```{r}
+df_raw <- foreign::read.dta("./rawdata/ologit.dta")
+df_raw
+```
+
+- apply：是否愿意申请研究生(unlikely, somewhat likely, or very likely), coded 1, 2, and 3
+- pared：父母教育程度，这里1 代表父母至少有1人本科毕业； 0代表父母都没有本科毕业
+- public：这里1代表研究机构是公立，0代表研究机构是私立
+- gpa：学生的GPA成绩
+
+
+以apply为结果变量，我们考察影响申请研究生意愿的因素
+
+```{r}
+key <- c("unlikely" = 1L, "somewhat likely" = 2L, "very likely" = 3L)
+
+
+df <- df_raw %>%
+  mutate(apply = recode(apply, !!!key)) 
+df
+```
+
+
+## 有序logistic回归
+
+这里需要用到**有序logistic回归**，为了理解模型的输出，我们需要先简单介绍下模型的含义。假定被解释变量$Y$有$J$类且有序，那么$Y$ 小于等于某个具体类别$j$的累积概率，可以写为$P(Y \le j)$，这里$j = 1, \cdots, J-1$. 从而，小于等于某个具体类别$j$的**比率**就可以定义为
+
+$$
+\frac{P(Y \le j)}{P(Y>j)}
+$$
+
+对这个比率取对数，就是我们熟知的logit
+
+$$
+\text{log} \frac{P(Y \le j)}{P(Y>j)} = \text{logit} (P(Y \le j)).
+$$
+
+在R语言中，有序logistic回归的数学模型就是
+
+$$
+\text{logit} (P(Y \le j)) = \alpha_{j} - \beta_{1}x_1 - \beta_{2}x_2 - \beta_{3}x_3 
+$$
+
+$\alpha$ 是截距，$\beta$ 是回归系数，注意到有序分类 logistic 回归模型中就有 $J-1$ 个 logit 模型。对于每个模型，系数是相同的，只是截距不同 (**模型平行线假定**)。
+
+$$
+\begin{aligned}
+\text{logit}(\hat{P}(Y \le 1))&= \text{logit}\left(p_{1}\right) = \ln \left(\frac{p_{1}}{1 - p_{1}}\right) = \alpha_{1} - \beta_{1}x_1 - \beta_{2}x_2 - \beta_{3}x_3 \\ 
+\text{logit}(\hat{P}(Y \le 2))&= \text{logit}\left(p_{1} + p_{2}\right) = \ln \left(\frac{p_{1} + p_{2}}{1 - p_{1} - p_{2}}\right) = \alpha_{2} - \beta_{1}x_1 - \beta_{2}x_2 - \beta_{3}x_3
+\end{aligned}
+$$
+
+
+
+##  polr 
+我们使用`MASS::polr`函数。
+
+```{r}
+# polr ask that response must be a factor
+
+## fit ordered logit model and store results 'm'
+m <- MASS::polr(apply ~ pared + public + gpa, data = df_raw, Hess=TRUE)
+
+## view a summary of the model
+summary(m)
+```
+
+
+因此，模型估计如下
+$$
+\begin{aligned}
+\text{logit}(\hat{P}(Y \le 1))&= \text{logit}\left(p_{1}\right) = \ln \left(\frac{p_{1}}{1 - p_{1}}\right) = 2.2 - 1.05x_1 - (-0.06)x_2 - 0.62x_3\\ 
+\text{logit}(\hat{P}(Y \le 2))&= \text{logit}\left(p_{1} + p_{2}\right) = \ln \left(\frac{p_{1} + p_{2}}{1 - p_{1} - p_{2}}\right) = 4.3 - 1.05x_1 - (-0.06)x_2 - 0.62x_3\\ 
+\end{aligned}
+$$
+
+## 系数的解释
+
+推荐您阅读[这里](https://stats.idre.ucla.edu/r/faq/ologit-coefficients/)
+
+先将系数转换成odds ratios(OR)
+
+```{r}
+coef(m) %>% exp()
+```
+
+### 父母受教育程度对申请意愿的影响
+
+在其它变量保持不变的前提下，对于 pared = 1 和 pared = 0 等式为
+
+$$
+\begin{aligned}
+\text{logit}(\hat{P}(Y \le 1) |x_1 = 1)&= \alpha_1 - \beta_1 \\ 
+\text{logit}(\hat{P}(Y \le 1) |x_1 = 0)&= \alpha_1  \\ 
+\end{aligned}
+$$
+$$
+\begin{aligned}
+\frac{P(Y \le 1 | x_1=1)}{P(Y \gt 1 | x_1=1)} & = \exp(\alpha_1)/\exp(\beta_1) \\
+\frac{P(Y \le 1 | x_1=0)}{P(Y \gt 1 | x_1=0)} & = \exp(\alpha_1) \\
+\end{aligned}
+$$
+
+
+$$
+\begin{aligned}
+ & \text{logit}(\hat{P}(Y \le 1) |x_1 = 1) - \text{logit}(\hat{P}(Y \le 1) |x_1 = 0)    \\
+& = \frac{P(Y \le 1 | x_1=1)}{P(Y \gt 1 | x_1=1)} / \frac{P(Y \le 1 | x_1=0)}{P(Y \gt 1 | x_1=0)} \\
+& =  (\exp(\alpha_1)/\exp(\beta_1) )/ \exp(\alpha_1) \\
+& = 1/\exp(\beta_1) \\
+& = \exp(-\beta_1)
+\end{aligned}
+$$
+
+根据**模型平行线假定**，对结果变量的其它分类($Y$有$J$个类别)，也同样有：
+$$
+\frac{P(Y \le j |x_1=1)}{P(Y>j|x_1=1)} / \frac{P(Y \le j |x_1=0)}{P(Y>j|x_1=0)}  =  \exp( -\beta_{1})
+$$
+
+因为 $exp(-\beta_{1}) =  \frac{1}{exp(\beta_{1})}$， 同时为了方便[解释](https://stats.idre.ucla.edu/r/faq/ologit-coefficients/)，把$P (Y >j)$位于分子位置，上面的等式变型为
+
+$$
+\frac{P (Y >j | x=1)/P(Y \le j|x=1)}{P(Y > j | x=0)/P(Y \le j | x=0)} = \exp(\beta_1)
+$$
+我们用 **大于$j$类别的比率**角度去解释系数，而不是 **小于$j$类别的比率**理解。
+
+
+这样解释就更符合人的直觉：
+
+- 父母读过大学的学生，打算申请读研的意愿（very likely and somewhat likely）的比率，是父母没读过大学学生的 $\exp(\beta_1) = 2.85$ 倍
+
+
+
+### 学校类型对申请意愿的影响
+
+类似地，在其它变量保持不变的前提下
+
+
+$$
+\frac{P (Y >j | x_2=1)/P(Y \le j|x_2=1)}{P(Y > j | x_2=0)/P(Y \le j | x_2=0)} = \exp(\beta_2) = \exp(-0.06)
+$$
+
+公立学校的学生，打算申请读研的意愿（very likely and somewhat likely）的比率，是私立学校学生的 0.94 倍，这样说怪怪的。
+
+
+这里$\exp(-0.06)$小于1，倍数表述不方便，可以把分子和分母交换位置，说私立是公立的多少倍，符合人的理解习惯
+
+$$
+\frac{P(Y > j | x_2=0)/P(Y \le j | x_2=0)}{P (Y >j | x_2=1)/P(Y \le j|x_2=1)}= \exp(-\beta_2) = \exp(0.06)
+$$
+
+私立学校的学生，打算申请读研的意愿（very likely and somewhat likely）的比率，是公立学校学生的 1.06 倍，这样感觉好多了。
+
+
+
+### GPA成绩对申请意愿的影响
+
+在其它变量保持不变的前提下，
+
+$$
+\frac{P (Y >j | x_3=1)/P(Y \le j|x_3=1)}{P(Y > j | x_3=0)/P(Y \le j | x_3=0)} = \exp(\beta_3) = 1.85
+$$
+
+
+学生gpa成绩每增加1个单位，申请读研的意愿（very likely and somewhat likely）的比率，增加 1.85 倍，即增长 85% .
+
+
+
+## stan 
+
+下面我们通过代码来演示
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+stan_program <- "
+data {
+  int<lower=2> K;
+  int<lower=0> N;
+  int<lower=1> D;
+  int<lower=1,upper=K> y[N];
+  matrix[N, D] x;
+}
+parameters {
+  vector[D] beta;
+  ordered[K-1] c;
+}
+model {
+  for (n in 1:N) {
+    target += ordered_logistic_lpmf(y[n] | x[n] * beta, c);
+  }
+  //for (n in 1:N)
+  //  y[n] ~ ordered_logistic(x[n] * beta, c);
+}
+"
+
+
+stan_data <- df %>% 
+  tidybayes::compose_data(
+    N   = n,
+    K   = 3,  
+    D   = 3,
+    y   = apply,  # factors are translated into numeric using as.numeric()
+    x   = model.matrix(~ 0 + pared + public + gpa, .)
+  )
+
+
+mod_stan <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+
+```{r}
+mod_stan
+```
+
+
+
+
+
+
+
+
+## brms
+```{r}
+library(brms)
+mod_brms <- brm(apply ~ pared + public + gpa, 
+                data = df,  
+                family = cumulative(link = "logit") 
+               ) 
+```
+
+
+```{r}
+mod_brms
+```
+
+
+
