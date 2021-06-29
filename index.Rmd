@@ -30,13 +30,13 @@ options(digits = 4,
         width = 55
         )
 knitr::opts_chunk$set(
-                      echo = TRUE, 
-                      warning = FALSE, 
-                      message = FALSE,
-                      fig.width = 6, 
-                      fig.height = 4,
-                      fig.showtext = TRUE
-                      )
+        echo = TRUE, 
+        warning = FALSE, 
+        message = FALSE,
+        fig.width = 6, 
+        fig.height = 4,
+        fig.showtext = TRUE
+       )
 ```
 
 
@@ -78,17 +78,31 @@ knitr::opts_chunk$set(
 - 第 \@ref(weighted) 章有权重的概率密度函数
 - 第 \@ref(meta) 章元分析
 - 第 \@ref(ordinary) 章有序回归模型
+- 第 \@ref(anova) 章方差分析
 
 
 
-## 用到的宏包 {-}
+## 配置环境 {-}
 
-```{r index-3, eval = FALSE}
-my_packages <- 
-  c("tidyverse", "rstan", "tidybayes", "bayesplot", "loo", "broom.mixed")
+- 安装 [Rtools4.0](https://cran.r-project.org/bin/windows/Rtools/) 到`C`盘
+   
+- 添加系统路径(电脑 - 属性 - 高级系统设置 - 环境变量 - 系统变量 - Path) 
+  - `C:\rtools40`
+  - `C:\rtools40\mingw64\bin`
+  - `C:\rtools40\usr\bin`
+  
+- 配置
+```{r index-3, eval=FALSE}
+writeLines('PATH="${RTOOLS40_HOME}\\usr\\bin;${PATH}"', con = "~/.Renviron")
 ```
 
+- 宏包
 ```{r index-4, eval = FALSE}
+install.packages(c("StanHeaders", "rstan"), type = "source")
+
+my_packages <- 
+  c("tidyverse", "tidybayes", "bayesplot", "loo", "broom.mixed")
+
 install.packages(my_packages, repos = "http://cran.rstudio.com", dependencies = T)
 ```
 

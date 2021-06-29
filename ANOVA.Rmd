@@ -1,0 +1,158 @@
+# 方差分析 {#anova}
+
+
+Bayesian ANOVA is usually represented as hierarchical model.
+
+
+```{r}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+```
+
+
+
+## data
+
+[数据来源](From http://personality-project.org/R/datasets/R.appendix1.data)
+
+```{r}
+alert <- tibble(Dosage = factor(rep(c("a", "b", "c"), each = 6)), 
+                Alertness = c(30, 38, 35, 41, 27, 24, 32, 26, 31, 
+                             29, 27, 35, 21, 25, 17, 21, 20, 10))
+alert
+```
+
+
+```{r}
+alert %>% 
+  ggplot(aes(x = Dosage, y = Alertness)) + 
+  stat_summary()
+```
+
+
+## "Frequentist" ANOVA
+
+
+```{r}
+summary(aov(Alertness ~ Dosage, data = alert))
+```
+
+
+```{r}
+aov(Alertness ~ Dosage, data = alert) %>%
+  TukeyHSD(which = "Dosage") %>%
+  broom::tidy()
+```
+
+
+
+## Bayesian ANOVA
+
+
+
+$$
+\begin{aligned}
+\textrm{Alertness} & \sim \textrm{normal}(\mu_{j}, \, \sigma) \\
+\mu_j  &\sim  \textrm{normal}(\gamma, \, \tau) \\
+\gamma &\sim  \textrm{normal}(0, \, 50) \\
+\tau &\sim  \textrm{gamma}(2, \, 1/8) \\
+\sigma &\sim  \textrm{student_t}(4, 0, 10) 
+\end{aligned} 
+$$
+
+
+## stan 代码
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- '
+data {
+  int<lower=1> N;                            
+  int<lower=2> n_groups;                     
+  vector[N] y;                               
+  int<lower=1, upper=n_groups> group_id[N];  
+}
+
+parameters {
+  vector[n_groups] mu;    
+  real<lower=0> sigma;  
+  real gamma;                    
+  real<lower=0> tau;                    
+      
+}
+model {
+
+  for (n in 1:N){
+    y[n] ~ normal(mu[group_id[n]], sigma);
+  }
+  
+  mu ~ normal(gamma, tau);
+  gamma ~ normal(0, 50);
+  tau ~ gamma(2, 0.125);
+  sigma ~ student_t(4, 0, 10);
+  
+}
+generated quantities {
+  real mu_diff_b_a;
+  real mu_diff_c_a;
+  real mu_diff_c_b;
+  mu_diff_b_a = mu[2] - mu[1];
+  mu_diff_c_a = mu[3] - mu[1];
+  mu_diff_c_b = mu[3] - mu[2];
+}
+'
+
+stan_data <- alert %>% 
+  tidybayes::compose_data(
+    N        = nrow(.), 
+    n_groups = n_distinct(Dosage), 
+    group_id = Dosage, 
+    y        = Alertness
+  )
+
+stan_anova <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+stan_anova
+```
+
+
+```{r, fig.width = 5, fig.height = 3}
+stan_anova %>% 
+  tidybayes::gather_draws(mu[i]) %>%
+  ungroup() %>% 
+  mutate(i = as_factor(i)) %>% 
+  
+  ggplot(aes(x = .value, y = i)) +
+  tidybayes::stat_halfeye() 
+```
+
+
+
+
+
+```{r, fig.width = 5, fig.height = 3}
+stan_anova %>% 
+  tidybayes::gather_draws(mu_diff_b_a, mu_diff_c_a, mu_diff_c_b) %>%
+  
+	ggplot(aes(x = .value, y = .variable)) +
+  stat_halfeye(
+    fill = "skyblue",
+  	point_interval = mode_hdi, 
+  	.width = c(0.5, 0.89),
+    interval_colour = "red", 
+    point_colour = "red"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", size = 1) +
+	labs(x = "mu_diff", y = NULL)
+```
+
+
+
+

@@ -27,5 +27,8 @@ rmd_files: [
   "Non_linear.Rmd",
   "kidiq.Rmd",
   "Voters_Polarize.Rmd",
-  "weighted_lm.Rmd"
+  "weighted_lm.Rmd",
+  "meta.Rmd",
+  "ordinary_model.Rmd",
+  "ANOVA.Rmd"
 ]
