@@ -79,6 +79,7 @@ knitr::opts_chunk$set(
 - 第 \@ref(meta) 章元分析
 - 第 \@ref(ordinary) 章有序回归模型
 - 第 \@ref(anova) 章方差分析
+- 第 \@ref(tokyo-olympics-100m) 章预测奥运会男子100米短跑成绩
 
 
 

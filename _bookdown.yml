@@ -30,5 +30,6 @@ rmd_files: [
   "weighted_lm.Rmd",
   "meta.Rmd",
   "ordinary_model.Rmd",
-  "ANOVA.Rmd"
+  "ANOVA.Rmd",
+  "tokyo-olympics-100m.Rmd"
 ]
