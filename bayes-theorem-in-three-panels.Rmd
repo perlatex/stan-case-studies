@@ -1,6 +1,6 @@
-# 贝叶斯建模 {#bayesian-in-three-panels}
+# 三张图讲贝叶斯公式 {#bayesian-in-three-panels}
 
-```{r bayes-01, message=FALSE, warning=FALSE}
+```{r, message=FALSE, warning=FALSE}
 library(tidyverse)
 library(tidybayes)
 library(rstan)
@@ -212,8 +212,8 @@ generated quantities {
   vector[M] y_fit; 
   //vector[M] y_rep; 
   for (i in 1:M) 
-    y_fit[i] = alpha + beta * x[i];                     // tidybayes::add_fitted_draws
-   //y_rep[i] = normal_rng(alpha + beta * x[i], sigma); // tidybayes::add_predict_draws
+    y_fit[i] = alpha + beta * x[i];                     // tidybayes::add_epred_draws or epred_draws
+   //y_rep[i] = normal_rng(alpha + beta * x[i], sigma); // tidybayes::predicted_draws or tidybayes::spread_draws or tidybayes::gather_draws
 }
 
 "

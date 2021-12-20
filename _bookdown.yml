@@ -31,5 +31,7 @@ rmd_files: [
   "meta.Rmd",
   "ordinary_model.Rmd",
   "ANOVA.Rmd",
-  "tokyo-olympics-100m.Rmd"
+  "tokyo-olympics-100m.Rmd",
+  "bayes-theorem-in-three-panels.Rmd",
+  "beta_regression.Rmd"
 ]
