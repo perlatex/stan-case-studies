@@ -1,0 +1,84 @@
+# Logistic-binomial model {#logistic-binomial}
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+
+```
+
+
+100个选手每人投篮20次，假定命中概率是身高的线性函数，案例来源`chap15.3` of [Regression and Other Stories] (page270). 
+
+```{r}
+n <- 100
+
+data <-
+  tibble(size   = 20,
+         height = rnorm(n, mean = 72, sd = 3)) %>% 
+  mutate(y = rbinom(n, size = size, p = 0.4 + 0.1 * (height - 72) / 3))
+
+head(data)
+```
+
+
+
+## 常规做法
+```{r}
+fit <- glm(
+  cbind(y, 20-y) ~ height, family = binomial(link = "logit"),
+  data = data
+)
+fit
+```
+
+
+## stan 代码
+$$
+\begin{align*}
+y_i & = \text{Binomial}(n_i, p_i) \\
+p_i & =\text{logit}^{-1}(X_i \beta) 
+\end{align*}
+$$
+
+```{r, warning=FALSE, message=FALSE}
+stan_program <- "
+data {
+  int<lower=0> N;
+  int<lower=0> K;
+  matrix[N, K] X;
+  int<lower=0> y[N];
+  int trials[N];
+}
+parameters {
+  vector[K] beta;
+}
+model {
+  
+  for(i in 1:N) {
+    target += binomial_logit_lpmf(y[i] | trials[i], X[i] * beta);
+  }
+  
+}
+"
+
+
+stan_data <- data %>%
+  tidybayes::compose_data(
+    N      = n,
+    K      = 2,
+    y      = y,
+    trials = size,
+    X      = model.matrix(~ 1 + height)
+  )
+m15.5 <- stan(model_code = stan_program, data = stan_data)
+```
+
+
+```{r}
+m15.5
+```
