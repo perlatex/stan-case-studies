@@ -288,9 +288,17 @@ stan_beta2 <- stan(model_code = stan_program, data = stan_data)
 
 边际效应，就是其他变量不变，只变化其中的一个是因子，然后看预测值随这个因子的变化情况，类似求偏导。具体实施，体现在stan代码中用`newdata`预测，比如
 
-1、`tidybayes::predict_draws()` 对应`generated quantities{}`中的 `y_predict[i] = normal_rng()`
-2、`tidybayes::epred_draws()`  对应`generated quantities{}`中的`y_fit[i] = mu[i]`
 
+
+beta回归模型是两个参数：
+
+- ` mu = inv_logit( a + b * new_x)`
+- `phi =       exp( c + d * new_x)`
+
+因此
+1、`tidybayes::linear_draws()`  对应`generated quantities{}`中的`y_fit[i] = a + b * new_x`                                        线性预测组合
+2、`tidybayes::epred_draws()`  对应`generated quantities{}`中的`y_fit[i] = inv_logit( a + b * new_x)`                             或者`y_fit[i] = mu[i]`;           
+3、`tidybayes::predict_draws()` 对应`generated quantities{}`中的 `y_predict[i] =  beta_rng(mu[i] * phi[i], (1 - mu[i]) * phi[i])` 预测
 
 
 

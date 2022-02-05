@@ -83,6 +83,7 @@ knitr::opts_chunk$set(
 - 第 \@ref(bayesian-in-three-panels) 章三张图讲贝叶斯分析
 - 第 \@ref(beta-regression) 章讲beta回归以及零膨胀模型
 - 第 \@ref(logistic-binomial) 章讲logistic binomial回归
+- 第 \@ref(glmm) 章讲Logistic multilevel growth model回归
 
 
 

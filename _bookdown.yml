@@ -34,5 +34,6 @@ rmd_files: [
   "tokyo-olympics-100m.Rmd",
   "bayes-theorem-in-three-panels.Rmd",
   "beta_regression.Rmd",
-  "logistic-binomial_model.Rmd"
+  "logistic-binomial_model.Rmd",
+  "GLMM.Rmd"
 ]
