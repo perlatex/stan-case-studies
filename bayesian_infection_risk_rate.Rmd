@@ -1,0 +1,159 @@
+---
+title: "美国新冠感染风险"
+author: "王大宝"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    number_sections: yes
+    df_print: kable
+linkcolor: red
+urlcolor: red
+header-includes:
+  - \usepackage[fontset = fandol]{ctex}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{underscore}
+  - \usepackage{booktabs}
+#  - \usepackage{indentfirst}\setlength{\parindent}{2em}
+classoptions: "hyperref, 12pt, a4paper"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.show = "hold",
+  fig.showtext = TRUE
+)
+knitr::knit_engines$set(stan = cmdstanr::eng_cmdstan)
+```
+
+
+
+
+
+# 问题
+
+在关于[medrxiv论文](https://www.medrxiv.org/content/10.1101/2022.11.19.22282525v3)的一则[评价博文](https://mp.weixin.qq.com/s/2j0nBriKprvJbG488sNxvw3)中，提到一组数据，
+美国有11.5%的人没打疫苗，88.4%的人打了。没打疫苗的人感染新冠比例是81.7%，
+而打了疫苗的人95.9%的感染。据此测算打疫苗的人比没打疫苗的感染高17%的风险。
+
+
+|  类型   	| 占人口比例 	|  感染比例 	|
+|---------	|:----------:	|:---------:	|
+|  接种   	|    88.4%   	|   95.9%   	|
+|  未接种 	|    11.5%   	|   81.7%   	|
+
+
+那么，这个17%的风险怎么得来的呢？
+
+
+# 模型
+
+$$
+\begin{aligned}
+y_{vac} \sim \textsf{binomial}(n_{vac},p_{vac}) \\
+y_{non} \sim \textsf{binomial}(n_{non},p_{non}) \\
+p_{vac} \sim \textsf{beta}(1, 1) \\
+p_{non} \sim \textsf{beta}(1, 1)
+\end{aligned}
+$$
+
+这里$p_{vac}$是**疫苗组**(vaccinated)的感染率，$p_{non}$是**未接种组**(non-vaccinated)的感染率。
+
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(ggdist)
+library(cmdstanr)
+check_cmdstan_toolchain(fix = TRUE, quiet = TRUE)
+```
+
+\medskip
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+stan_program <- write_stan_file("
+data {
+  int<lower=1> event_non;        
+  int<lower=1> event_vac;        
+  int<lower=1> n_non;            
+  int<lower=1> n_vac;            
+}
+parameters {
+  real<lower=0, upper=1> p_non;    
+  real<lower=0, upper=1> p_vac;    
+}
+model {
+  event_vac ~ binomial(n_vac, p_vac);
+  event_non ~ binomial(n_non, p_non);
+  p_vac ~ beta(1, 1);
+  p_non ~ beta(1, 1);
+}
+generated quantities {
+  //real diff  = p_vac - p_non;
+  real RR    = p_vac / p_non;
+}
+"
+)
+
+stan_data <- lst(
+  N         = 3e+08,   # 美国人口数量
+  n_vac     = 0.884*N,
+  n_non     = 0.115*N,
+  event_vac = 0.959*0.884*N,
+  event_non = 0.817*0.115*N
+)
+
+model <- cmdstan_model(stan_file = stan_program)
+fit <- model$sample(
+  data          = stan_data,
+  chains        = 4,
+  iter_warmup   = 1000,
+  iter_sampling = 1000
+  )
+```
+
+
+# 结果
+
+得到了文中的结果，相对危险度 1.17
+
+```{r, echo=FALSE}
+fit$summary(variables = c("RR")) %>% 
+  knitr::kable(format = "latex", digits = 3, booktabs = TRUE)
+```
+
+我们使用的样本量大，所以不确定性很小
+
+\medskip
+
+
+```{r, out.width = '75%'}
+draws <- fit %>%
+  tidybayes::spread_draws(RR)
+
+draws %>% 
+  ggplot(aes(x = RR)) +
+  ggdist::stat_halfeye(
+    fill           = "skyblue",
+    point_interval = "median_qi",
+    .width         = c(0.6, 0.89),
+    interval_color = "red",
+    point_color    = "red"
+  ) +
+  labs(x = "相对危险度", y = NULL)
+```
+
+# 感谢
+
+非常感谢 Dr.Lee 指出我计算公式的错误，
+这里的效应量是人群发病率的比值，即应该是相除，而不是相减。我需要多请教专业人士。
+
+
+
